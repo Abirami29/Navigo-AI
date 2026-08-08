@@ -1,0 +1,28 @@
+bundle:
+  name: navigo-ai
+
+variables:
+  lakebase_secret_scope:
+    description: Secret scope holding Lakebase connection credentials
+    default: navigo_secrets
+  model_serving_endpoint:
+    description: Name of the Databricks Model Serving endpoint used by the agent
+    default: databricks-meta-llama-3-70b-instruct
+
+include:
+  - resources/jobs/*.yml
+  - resources/apps/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://your-workspace.cloud.databricks.com
+
+  prod:
+    mode: production
+    workspace:
+      host: https://your-workspace.cloud.databricks.com
+    run_as:
+      user_name: your-service-principal-or-user
