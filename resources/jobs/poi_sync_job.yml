@@ -1,0 +1,26 @@
+resources:
+  jobs:
+    navigo_poi_sync:
+      name: navigo-poi-sync
+      description: >
+        Syncs accessibility and kid-friendly POI tags (wheelchair access, changing
+        tables, highchairs, playgrounds) from OpenStreetMap Overpass API into the
+        activities table for every active destination. Runs daily and batches
+        requests per Overpass usage etiquette — never called live per user request.
+      schedule:
+        quartz_cron_expression: "0 0 3 * * ?"    # daily at 03:00 UTC
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: sync_overpass_poi
+          notebook_task:
+            notebook_path: ../../notebooks/01_ingest_seed_destinations.py
+            base_parameters:
+              mode: refresh_poi_only
+          environment_key: navigo_env
+      environments:
+        - environment_key: navigo_env
+          spec:
+            client: "1"
+            dependencies:
+              - -r ../../requirements.txt

@@ -1,0 +1,25 @@
+resources:
+  jobs:
+    navigo_weather_refresh:
+      name: navigo-weather-refresh
+      description: >
+        Refreshes weather, air quality, UV, and pollen data for every destination
+        with an active trip. Runs on a schedule rather than per-request to stay
+        within Free Edition fair-use quotas.
+      schedule:
+        quartz_cron_expression: "0 0 */4 * * ?"   # every 4 hours
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: refresh_weather_snapshots
+          notebook_task:
+            notebook_path: ../../notebooks/01_ingest_seed_destinations.py
+            base_parameters:
+              mode: refresh_weather_only
+          environment_key: navigo_env
+      environments:
+        - environment_key: navigo_env
+          spec:
+            client: "1"
+            dependencies:
+              - -r ../../requirements.txt

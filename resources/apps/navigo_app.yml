@@ -1,0 +1,17 @@
+resources:
+  apps:
+    navigo_app:
+      name: navigo
+      description: Family holiday planner UI — trip setup, itinerary, and the agent's decision log.
+      source_code_path: ../../src/navigo/app
+      resources:
+        - name: lakebase
+          description: Lakebase Postgres instance backing Navigo's tables
+          secret:
+            scope: ${var.lakebase_secret_scope}
+            key: lakebase_connection
+        - name: model-serving
+          description: Foundation model endpoint used by the planning agent
+          serving_endpoint:
+            name: ${var.model_serving_endpoint}
+            permission: CAN_QUERY
