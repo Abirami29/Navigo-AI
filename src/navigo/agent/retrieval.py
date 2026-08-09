@@ -40,10 +40,14 @@ def semantic_search_activities(query_text: str, destination_id: str, top_k: int 
         return []
 
     try:
-        vsc = VectorSearchClient(
-            workspace_url=DATABRICKS.host or None,
-            personal_access_token=DATABRICKS.token or None,
-        )
+        # No explicit workspace_url/personal_access_token: those force a
+        # PAT-only assumption that broke inside a deployed Databricks App
+        # (no DATABRICKS_TOKEN exists there — see agent.py's
+        # _get_auth_headers for the same issue, hit for real on a live
+        # deploy). Constructed bare, VectorSearchClient auto-resolves
+        # credentials the same unified way WorkspaceClient does — the
+        # app's own service-principal OAuth when deployed, your PAT locally.
+        vsc = VectorSearchClient()
         index = vsc.get_index(DATABRICKS.vector_search_endpoint, DATABRICKS.vector_index)
         results = index.similarity_search(
             query_text=query_text,

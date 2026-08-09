@@ -544,6 +544,30 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     )
 
 
+_workspace_client = None
+
+
+def _get_auth_headers() -> dict:
+    """Resolves auth headers via the Databricks SDK's unified auth, which
+    works correctly in BOTH execution contexts this project actually runs
+    in — locally (uses DATABRICKS_TOKEN, your PAT) and inside a deployed
+    Databricks App (uses the app's own dedicated service-principal OAuth
+    credentials, auto-injected as DATABRICKS_CLIENT_ID/DATABRICKS_CLIENT_SECRET
+    — no DATABRICKS_TOKEN exists there at all). A real deployed run
+    confirmed this: manually building "Authorization: Bearer {DATABRICKS.token}"
+    failed with 401 "Credential was not sent", since DATABRICKS.token was
+    simply empty in that environment. WorkspaceClient().config.authenticate()
+    auto-resolves the right mechanism instead of us having to detect which
+    one applies. Client created lazily and reused (not per-call) since
+    constructing it does real auth-discovery work.
+    """
+    global _workspace_client
+    if _workspace_client is None:
+        from databricks.sdk import WorkspaceClient
+        _workspace_client = WorkspaceClient()
+    return _workspace_client.config.authenticate()
+
+
 @retry(
     retry=retry_if_exception(_is_rate_limit_error),
     stop=stop_after_attempt(5),
@@ -551,9 +575,10 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     reraise=True,
 )
 def _call_model_serving(messages: list[dict]) -> dict:
+    headers = {**_get_auth_headers(), "Content-Type": "application/json"}
     resp = requests.post(
         f"{DATABRICKS.host}/serving-endpoints/{DATABRICKS.model_serving_endpoint}/invocations",
-        headers={"Authorization": f"Bearer {DATABRICKS.token}", "Content-Type": "application/json"},
+        headers=headers,
         json={"messages": messages, "tools": TOOL_SCHEMAS, "max_tokens": 1500},
         timeout=60,
     )
