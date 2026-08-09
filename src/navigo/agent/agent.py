@@ -30,16 +30,30 @@ to get the destination_id — every search and weather tool requires it, and
 it cannot be guessed or inferred from conversation. Then ground yourself in
 the family's actual constraints and preferences using the tools available:
   - get_travelers — the actual roster: who's coming, ages, mobility needs,
-    dietary restrictions, nap windows, sensory notes. Use this for "who is
+    dietary restrictions, scheduled breaks, sensory notes. Use this for "who is
     coming" / "tell me about this trip" questions.
   - get_accessibility_requirement, get_dietary_restrictions — HARD constraints.
     Never suggest or schedule an activity that fails these. There is no
     "close enough": a venue that isn't step-free when a traveler needs a
     wheelchair, or a restaurant with no safe option for a food allergy, is
     disqualified, not a compromise.
-  - get_family_walk_budget, get_nap_windows — schedule around these. Don't
-    plan anything during a nap window, and keep each day's total walking
-    within the tightest traveler's budget, not the group average.
+  - get_family_walk_budget, get_break_windows — schedule around these. Don't
+    plan anything during a family member's scheduled break — it might be a
+    nap, but could just as easily be a lunch window, rest time, or
+    medication schedule. Call it a "break" in your explanations unless the
+    traveler's own notes specifically say "nap" — never assume nap by
+    default. Keep each day's total walking within the tightest traveler's
+    budget, not the group average.
+
+CRITICAL — walking budget is a TIME limit you must reason about yourself,
+not a filter any search tool applies. get_family_walk_budget() tells you
+the number; no activity data includes distance from lodging or between
+venues, and no search tool filters or ranks by walking distance. NEVER say
+an activity "accommodates limited walking," is "close by," or similar —
+you have no location/distance data to back that up. You can and should
+still respect the walk budget by limiting how MANY activities or how much
+total time you schedule in a day, but don't claim distance-based
+suitability you can't actually verify.
   - get_trip_interests — the family's stated interests/notes. Use this as
     the search_activities_by_interest() query text (combined with current
     weather conditions) so choices reflect what THIS family wants, not just
@@ -57,9 +71,21 @@ outdoor plans for it. If rain or poor air quality is forecast, prefer indoor
 alternatives from the start rather than scheduling outdoor activities you'll
 just have to reschedule later.
 
-To build the itinerary, call create_itinerary_item() for each activity you
-place on the schedule. To change your mind, use reschedule_item() to move
-something or delete_itinerary_item() to remove it — always with a clear
+CRITICAL — propose before you commit: only call create_itinerary_item()
+when the user has explicitly asked you to add/schedule/book/plan a specific
+activity, or has just chosen one from options you presented earlier in this
+conversation. If their message is a browse/discovery request ("find
+activities," "what museums are there," "any ideas for tomorrow") without
+that explicit intent, DO NOT create anything — instead, search and present
+a short list (3-5) of real options with enough detail to choose from (name,
+category, why it fits their interests, accessibility status, weather fit
+if relevant), then end your turn asking which they'd like. Never use an
+item already on the itinerary as a reason to skip presenting options for a
+browse request — "is there already something planned" and "show me choices"
+are different questions, and an existing item only answers the first one.
+
+To change your mind about something already scheduled, use reschedule_item()
+to move it or delete_itinerary_item() to remove it — always with a clear
 `explanation`/`reason` in plain, warm language a tired parent can read in
 five seconds. Weather-triggered changes must use the matching `trigger`
 value (rain_forecast, high_aqi) so they're logged correctly.
@@ -95,6 +121,22 @@ that a tool can look up for you. If they refer to something by description
 matching lookup tool first (get_itinerary for existing items,
 get_trip_destination for destination_id) and match it yourself — asking the
 user for an internal database ID is never the right move.
+
+CRITICAL — destinations you have no data for: Navigo only has real,
+verified data (weather, accessibility, venues) for destinations that have
+actually been seeded — check list_seeded_destinations() before discussing
+ANY destination other than the trip's current one. If asked to suggest
+other destinations, cities, or places to visit, and the request is
+ambiguous about whether they mean nearby attractions from the CURRENT trip
+destination vs. a different city entirely, ask which they mean. Either way,
+for any destination NOT in list_seeded_destinations(), you may still name
+it as a general idea, but you MUST say plainly that Navigo has no verified
+data for it — do not state that a specific venue there is wheelchair
+accessible, kid-friendly, or anything else as if it were confirmed. Stating
+an unverified accessibility claim with the same confidence as a real,
+OSM-verified one is the exact failure this product exists to prevent, and
+it is worse for a destination with zero real data behind it than for one
+unverified venue in a place you do have data for.
 """
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -114,7 +156,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_travelers",
-            "description": "Get the full traveler roster for a trip — label, age, mobility need, walk budget, nap window, sensory notes, dietary restrictions. Use this for 'who is coming' / 'tell me about the family' type questions — the other traveler tools only return aggregated constraints, not the roster.",
+            "description": "Get the full traveler roster for a trip — label, age, mobility need, walk budget, scheduled break window, sensory notes, dietary restrictions. Use this for 'who is coming' / 'tell me about the family' type questions — the other traveler tools only return aggregated constraints, not the roster.",
             "parameters": {
                 "type": "object",
                 "properties": {"trip_id": {"type": "string"}},
@@ -132,6 +174,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {"trip_id": {"type": "string"}},
                 "required": ["trip_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_seeded_destinations",
+            "description": "Get every destination Navigo has real verified data for. REQUIRED before discussing accessibility, weather, or specific venues for ANY destination that isn't the trip's current one — a destination not in this list has NO real Navigo data, and you must say so explicitly rather than stating claims from general knowledge as if they were verified.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -176,8 +226,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "get_nap_windows",
-            "description": "Get all travelers' nap windows so nothing gets scheduled over them.",
+            "name": "get_break_windows",
+            "description": "Get all travelers' scheduled break windows (nap, lunch, rest, medication — whatever they noted) so nothing gets scheduled over them. Refer to these as 'breaks' when explaining changes, not 'naps', unless the traveler's own notes specifically say nap.",
             "parameters": {
                 "type": "object",
                 "properties": {"trip_id": {"type": "string"}},
@@ -296,7 +346,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "new_end_time": {"type": "string"},
                     "trigger": {
                         "type": "string",
-                        "enum": ["rain_forecast", "high_aqi", "nap_conflict", "walk_budget_exceeded",
+                        "enum": ["rain_forecast", "high_aqi", "break_conflict", "walk_budget_exceeded",
                                  "unverified_accessibility", "user_request"],
                     },
                     "explanation": {"type": "string"},
@@ -363,10 +413,11 @@ _TOOL_DISPATCH = {
     "get_trip_interests": tools.get_trip_interests,
     "get_travelers": tools.get_travelers,
     "get_trip_destination": tools.get_trip_destination,
+    "list_seeded_destinations": tools.list_seeded_destinations,
     "get_accessibility_requirement": tools.get_accessibility_requirement,
     "get_dietary_restrictions": tools.get_dietary_restrictions,
     "get_family_walk_budget": tools.get_family_walk_budget,
-    "get_nap_windows": tools.get_nap_windows,
+    "get_break_windows": tools.get_break_windows,
     "search_activities_by_interest": tools.search_activities_by_interest,
     "search_eligible_activities": tools.search_eligible_activities,
     "get_weather_and_air_quality": tools.get_weather_and_air_quality,

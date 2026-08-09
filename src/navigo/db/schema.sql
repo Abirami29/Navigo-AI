@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS agent_decisions (
     decision_type              TEXT NOT NULL
         CHECK (decision_type IN ('reschedule', 'swap', 'remove', 'packing_suggestion', 'accessibility_flag', 'dietary_flag')),
     trigger                     TEXT NOT NULL
-        CHECK (trigger IN ('rain_forecast', 'high_aqi', 'nap_conflict', 'walk_budget_exceeded',
+        CHECK (trigger IN ('rain_forecast', 'high_aqi', 'break_conflict', 'walk_budget_exceeded',
                             'unverified_accessibility', 'unverified_dietary_safety', 'user_request')),
     explanation                  TEXT NOT NULL,
     created_at                     TIMESTAMPTZ NOT NULL DEFAULT now()

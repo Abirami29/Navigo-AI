@@ -30,11 +30,20 @@ def get_family_walk_budget(trip_id: str, day_date: date) -> int | None:
     return min(r["max_walk_minutes"] for r in rows)
 
 
-def get_nap_windows(trip_id: str) -> list[dict]:
-    """Returns all travelers' nap windows so the agent avoids scheduling over them."""
+def get_break_windows(trip_id: str) -> list[dict]:
+    """Returns all travelers' scheduled break windows (nap, lunch, rest,
+    medication — whatever they noted) so the agent avoids scheduling over
+    them. Aliased to break_start/break_end in the query specifically so the
+    model never sees the literal word "nap" in the data — a real run showed
+    it explaining every reschedule as a "nap conflict" even for an adult's
+    lunch break, because the raw tool output had nap_window_start/end as key
+    names, which is a stronger source of that wording than any docstring.
+    The underlying DB columns are still named nap_window_start/end — only
+    what's actually shown to the LLM changed, not the schema.
+    """
     return db.fetch_all(
         """
-        SELECT label, nap_window_start, nap_window_end
+        SELECT label, nap_window_start AS break_start, nap_window_end AS break_end
         FROM travelers
         WHERE trip_id = %s AND nap_window_start IS NOT NULL
         """,
@@ -84,21 +93,22 @@ def get_trip_interests(trip_id: str) -> dict:
 
 def get_travelers(trip_id: str) -> list[dict]:
     """Returns the full traveler roster — label, age, mobility need, walk
-    budget, nap window, sensory notes, dietary restrictions — for everyone
-    on the trip. This is the "who is coming" answer.
+    budget, scheduled break window, sensory notes, dietary restrictions —
+    for everyone on the trip. This is the "who is coming" answer.
 
     Every other traveler-related tool (get_accessibility_requirement,
-    get_dietary_restrictions, get_family_walk_budget, get_nap_windows)
+    get_dietary_restrictions, get_family_walk_budget, get_break_windows)
     returns an aggregated/derived constraint across all travelers, not the
-    roster itself, and get_nap_windows only returns travelers who HAVE a
-    nap window set — so none of them alone (or together) can answer "who is
-    on this trip." This was a real gap: the agent had no way to answer that
-    question at all until this tool existed.
+    roster itself, and get_break_windows only returns travelers who HAVE a
+    break window set — so none of them alone (or together) can answer "who
+    is on this trip." This was a real gap: the agent had no way to answer
+    that question at all until this tool existed.
     """
     return db.fetch_all(
         """
         SELECT label, age_years, mobility_need, max_walk_minutes,
-               nap_window_start, nap_window_end, sensory_notes, dietary_restrictions
+               nap_window_start AS break_start, nap_window_end AS break_end,
+               sensory_notes, dietary_restrictions
         FROM travelers
         WHERE trip_id = %s
         """,
@@ -127,6 +137,24 @@ def get_trip_destination(trip_id: str) -> dict | None:
         """,
         (trip_id,),
     )
+
+
+def list_seeded_destinations() -> list[dict]:
+    """Returns every destination Navigo actually has real data for —
+    geocoded, weather/AQI fetched, Overpass POIs pulled.
+
+    This exists so the agent can tell the difference between a destination
+    it has verified data about and one it only "knows" from general
+    training knowledge. A real run showed the agent confidently naming
+    specific wheelchair-accessible attractions in cities that were never
+    seeded — Rijksmuseum, Dublin Zoo, Tivoli Gardens — with the exact same
+    confident tone as genuinely OSM-verified Edinburgh venues. That's the
+    same false-safety-claim failure mode already fixed for individual
+    activities, just relocated to an entire destination that was never
+    checked at all. See the system prompt's rule requiring this tool be
+    called before discussing any destination's accessibility.
+    """
+    return db.fetch_all("SELECT name, country FROM destinations ORDER BY name")
 
 
 def _apply_hard_filters(rows: list[dict], trip_id: str) -> list[dict]:
@@ -371,7 +399,7 @@ def reschedule_item(
     """Moves an itinerary item and logs the decision to agent_decisions.
 
     trigger must be one of the CHECK-constrained values in schema.sql
-    (rain_forecast, high_aqi, nap_conflict, walk_budget_exceeded,
+    (rain_forecast, high_aqi, break_conflict, walk_budget_exceeded,
     unverified_accessibility, user_request).
     """
     db.execute(
