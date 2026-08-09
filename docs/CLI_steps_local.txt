@@ -224,3 +224,82 @@ execute('''ALTER TABLE agent_decisions ADD CONSTRAINT agent_decisions_trigger_ch
 print('Migration applied.')
 "
 Migration applied.
+
+
+
+python phase_c_smoke_test.py
+
+============================================================
+0. Look up the seeded destination
+============================================================
+Using destination: Edinburgh (a35ff349-57b9-44b1-8a19-13add1eb1d41)
+
+============================================================
+1. Create a test user + trip
+============================================================
+Created trip: b0b372a2-48b5-4835-93da-e346f89a9e96
+
+============================================================
+2. Add travelers with real, mixed constraints
+============================================================
+Added 3 travelers: Mum (no constraints), Grandpa (wheelchair, 90min walk budget), Leo (age 4, stroller, nap 1:00-2:30pm, peanut allergy, sensory-sensitive)
+
+============================================================
+3. Read back the hard constraints exactly as the agent would see them
+============================================================
+get_trip_interests: {'interests': ['museums', 'castles & history', 'animals & wildlife'], 'notes': 'We love hands-on science museums, not big on crowds.'}
+get_accessibility_requirement (expect 'wheelchair' — the strictest): wheelchair
+get_dietary_restrictions (expect ['peanut_allergy']): ['peanut_allergy']
+get_family_walk_budget (expect 60 — Leo's, the lowest/most restrictive): 60
+get_nap_windows (expect Leo, 13:00-14:30): [{'label': 'Leo (age 4)', 'nap_window_start': datetime.time(13, 0), 'nap_window_end': datetime.time(14, 30)}]
+
+============================================================
+4. search_eligible_activities — hard filters only, no semantic ranking
+============================================================
+Eligible restaurants: 1631 — wheelchair='no' is still excluded (a real hard filter, since Grandpa needs a wheelchair), but missing dietary data no longer hides a restaurant outright; it gets annotated with confirmed/unconfirmed instead.
+  Singh Street Cha | wheelchair=yes | confirmed=[] | unconfirmed=['peanut_allergy']
+  Boardwalk Beach Club | wheelchair=unknown | confirmed=[] | unconfirmed=['peanut_allergy']
+  Costa | wheelchair=unknown | confirmed=[] | unconfirmed=['peanut_allergy']
+  Sofia’s | wheelchair=unknown | confirmed=[] | unconfirmed=['peanut_allergy']
+  The Terrace Cafe | wheelchair=unknown | confirmed=[] | unconfirmed=['peanut_allergy']
+
+============================================================
+5. search_activities_by_interest — semantic search + the SAME hard filters
+============================================================
+(Falls back to hard-filter-only browsing if Vector Search isn't deployed yet — expected until you've done Phase E. Check which path it took below.)
+Got 5 results:
+  Museum of Magic, Fortune-Telling and Witchcraft | museum | wheelchair=unknown
+  Talbot Rice Gallery | museum | wheelchair=yes
+  Taste Good | restaurant | wheelchair=unknown
+  Good Burger | restaurant | wheelchair=unknown
+  Good Choice | restaurant | wheelchair=unknown
+
+============================================================
+6. create_itinerary_item — the tool that didn't exist before this pass
+============================================================
+Created itinerary item 9d8877b1-6656-40d9-93bf-f4bf23941134 for 'Museum of Magic, Fortune-Telling and Witchcraft' at 10:00-11:30
+Flagged as unverified accessibility (osm_wheelchair was 'unknown')
+
+============================================================
+7. delete_itinerary_item — the other tool that didn't exist before
+============================================================
+Deleted item 9d8877b1-6656-40d9-93bf-f4bf23941134
+
+============================================================
+8. build_packing_item — unchanged, confirming it still works
+============================================================
+Added a packing item
+
+============================================================
+9. agent_decisions — the full audit trail from this run
+============================================================
+  [accessibility_flag/unverified_accessibility] Accessibility info for 'Museum of Magic, Fortune-Telling and Witchcraft' comes from OpenStreetMap and hasn't been manually verified — worth a quick check or call ahead before you rely on it.
+  [remove/user_request] Removed 'Museum of Magic, Fortune-Telling and Witchcraft': testing the delete tool
+
+============================================================
+Done
+============================================================
+trip_id = b0b372a2-48b5-4835-93da-e346f89a9e96
+Reuse this trip_id to keep testing tools.py functions directly, or in the Streamlit app's 'Ask Navigo' / 'Why it changed' tabs once Model Serving is deployed.
+
+
