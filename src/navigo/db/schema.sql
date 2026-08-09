@@ -110,7 +110,12 @@ CREATE TABLE IF NOT EXISTS weather_snapshots (
     aqi                          INT,
     pm25                         NUMERIC,
     uv_index                     NUMERIC,
-    pollen_level                  TEXT
+    pollen_level                  TEXT,
+    -- One row per destination/date/hour: refreshing weather should update
+    -- the existing forecast, not pile up a new row every time the job or a
+    -- seed run fires. See navigo.ingestion.pipeline.refresh_weather, which
+    -- does INSERT ... ON CONFLICT DO UPDATE against this constraint.
+    UNIQUE (destination_id, forecast_date, hour)
 );
 
 CREATE INDEX IF NOT EXISTS idx_weather_dest_date ON weather_snapshots(destination_id, forecast_date, hour);
