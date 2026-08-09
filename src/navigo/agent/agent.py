@@ -25,6 +25,22 @@ You are Navigo, a family holiday planning assistant. Your job is to build \
 and adjust day-by-day itineraries that genuinely work for the specific \
 family on this trip — not a generic list of tourist attractions.
 
+STARTING A NEW TRIP: if the conversation has no established trip yet (the
+message is marked "[no trip created yet]"), your first job is figuring out
+whether the user wants to start one. If they describe a trip (a
+destination, and ideally dates), call create_trip() as soon as you have a
+destination name and start/end dates — don't demand every detail first;
+missing interests/notes are fine to skip or ask about after. If dates are
+missing entirely, ask for them before creating anything (day-by-day
+planning needs real dates). Once create_trip() succeeds, call add_traveler()
+for each person they've mentioned so far, even with incomplete details —
+age, mobility needs, and dietary restrictions can all be added or corrected
+later in the same conversation as they come up. Don't block trip creation
+on a complete traveler roster. After creating the trip (and any travelers
+you have info for), confirm what you set up in plain language and ask
+anything still needed (e.g. "who else is coming?" or "any accessibility or
+dietary needs I should know about?").
+
 Before suggesting or scheduling ANYTHING, first call get_trip_destination()
 to get the destination_id — every search and weather tool requires it, and
 it cannot be guessed or inferred from conversation. Then ground yourself in
@@ -140,6 +156,47 @@ unverified venue in a place you do have data for.
 """
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_trip",
+            "description": "Create a brand-new trip. Call this as soon as you have a destination name and start/end dates from the conversation — don't wait for complete details. Looks up or fully seeds the destination automatically (can take up to a minute for a brand-new city).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_name": {"type": "string", "description": "A short name for the trip, e.g. 'Summer holiday in London'."},
+                    "destination_name": {"type": "string", "description": "Plain city name, e.g. 'Edinburgh' — avoid 'City, Country' format."},
+                    "start_date": {"type": "string", "format": "date"},
+                    "end_date": {"type": "string", "format": "date"},
+                    "interests": {"type": "array", "items": {"type": "string"}, "description": "What the family enjoys, e.g. ['museums', 'animals']. Optional."},
+                    "notes": {"type": "string", "description": "Any other free-text context about the trip. Optional."},
+                },
+                "required": ["trip_name", "destination_name", "start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_traveler",
+            "description": "Add one person to a trip. Call once per traveler mentioned. Only trip_id and label are required — everything else can be added later as it comes up in conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "label": {"type": "string", "description": "e.g. 'Mum', 'Leo (age 4)'."},
+                    "age_years": {"type": "number"},
+                    "mobility_need": {"type": "string", "enum": ["none", "wheelchair", "stroller", "limited_walking"]},
+                    "max_walk_minutes": {"type": "integer"},
+                    "break_start": {"type": "string", "description": "HH:MM, if they have a scheduled break (nap/lunch/rest/etc)."},
+                    "break_end": {"type": "string"},
+                    "sensory_notes": {"type": "string"},
+                    "dietary_restrictions": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["trip_id", "label"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -410,6 +467,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 _TOOL_DISPATCH = {
+    "create_trip": tools.create_trip,
+    "add_traveler": tools.add_traveler,
     "get_trip_interests": tools.get_trip_interests,
     "get_travelers": tools.get_travelers,
     "get_trip_destination": tools.get_trip_destination,
@@ -445,11 +504,21 @@ def _call_model_serving(messages: list[dict]) -> dict:
         json={"messages": messages, "tools": TOOL_SCHEMAS, "max_tokens": 1500},
         timeout=60,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        # raise_for_status() alone only gives a generic "400 Client Error"
+        # with none of the actual detail — the API's response body is where
+        # the real cause lives (e.g. the PERMISSION_DENIED/ENDPOINT_NOT_FOUND
+        # messages seen earlier in this project). Surface it directly rather
+        # than making every failure here undebuggable from just the traceback.
+        raise requests.exceptions.HTTPError(
+            f"Model Serving returned {resp.status_code}: {resp.text}", response=resp
+        )
     return resp.json()
 
 
-def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None = None) -> str:
+def run_agent_turn(
+    trip_id: str | None, user_message: str, history: list[dict] | None = None
+) -> dict:
     """Runs one conversational turn to completion: sends the message + tool
     schemas to the model, executes any requested tool calls, feeds results
     back, and repeats until the model returns a final text answer (or
@@ -457,6 +526,18 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
     many tool calls across several rounds — checking constraints, checking
     weather per day, searching and creating items per day — so this can't be
     a single request/response pair the way it could for a simple lookup.
+
+    trip_id may be None/empty for a brand-new conversation where no trip
+    exists yet — trip creation itself now happens through chat (create_trip),
+    so there's a real chicken-and-egg moment before the first trip_id exists.
+
+    Returns {"content": str, "new_trip_id": str | None} rather than a bare
+    string — new_trip_id is set if this turn successfully called
+    create_trip(), so the caller (the UI) can pick up the newly-created
+    trip_id and use it for every message from here on. Without this, the
+    only way to notice a new trip_id was created would be to parse it back
+    out of the reply text, which is fragile — this is the explicit,
+    structured version instead.
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history or [])
@@ -466,12 +547,15 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
     # is unresolvable or guessed wrong, which silently breaks anything that
     # calls create_itinerary_item/reschedule_item with a day_date.
     today_str = date.today().isoformat()
+    trip_context = f"[trip_id={trip_id}]" if trip_id else "[no trip created yet]"
     messages.append(
         {
             "role": "user",
-            "content": f"[trip_id={trip_id}] [today's date is {today_str}] {user_message}",
+            "content": f"{trip_context} [today's date is {today_str}] {user_message}",
         }
     )
+
+    new_trip_id: str | None = None
 
     for _ in range(_MAX_TOOL_ROUNDS):
         response = _call_model_serving(messages)
@@ -479,7 +563,7 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
 
         tool_calls = choice.get("tool_calls") or []
         if not tool_calls:
-            return choice.get("content", "")
+            return {"content": choice.get("content", ""), "new_trip_id": new_trip_id}
 
         messages.append(choice)
         for call in tool_calls:
@@ -487,6 +571,8 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
             fn_args = json.loads(call["function"]["arguments"])
             try:
                 result = _TOOL_DISPATCH[fn_name](**fn_args)
+                if fn_name == "create_trip" and isinstance(result, dict):
+                    new_trip_id = result.get("trip_id")
             except Exception as exc:
                 # Feed the error back to the model as a tool result rather
                 # than crashing the whole turn — lets it try a different
@@ -501,7 +587,10 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
                 }
             )
 
-    return (
-        "I made a lot of changes but ran out of steps before finishing this "
-        "turn — could you ask me to continue, or narrow down what's left?"
-    )
+    return {
+        "content": (
+            "I made a lot of changes but ran out of steps before finishing this "
+            "turn — could you ask me to continue, or narrow down what's left?"
+        ),
+        "new_trip_id": new_trip_id,
+    }

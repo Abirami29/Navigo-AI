@@ -13,6 +13,88 @@ from datetime import date, time
 
 from navigo.agent import retrieval
 from navigo.db import client as db
+from navigo.ingestion.pipeline import get_or_create_destination
+
+
+def create_trip(
+    trip_name: str,
+    destination_name: str,
+    start_date: date,
+    end_date: date,
+    interests: list[str] | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Creates a brand-new trip from a conversational description — this is
+    what lets trip creation happen entirely through chat instead of a
+    separate form. Looks up (or fully seeds, if new) the destination via
+    get_or_create_destination, same as the old Streamlit "Save trip" form
+    used, so a never-before-seen city still gets real weather/accessibility
+    data, not just a bare row.
+
+    Returns {"trip_id": ..., "destination_seeded": bool} — the caller (the
+    agent orchestration loop) captures trip_id specifically so the UI can
+    learn about a trip that didn't exist when the conversation started.
+
+    Creates a bare `users` row alongside the trip (Navigo has no real auth
+    system) — trip_name is reused as the display name, matching the pattern
+    already used elsewhere for test/demo data.
+    """
+    destination_id, was_seeded = get_or_create_destination(destination_name)
+    if destination_id is None:
+        raise ValueError(
+            f"Couldn't find '{destination_name}' — try a plain city name "
+            "without a country suffix (e.g. 'Edinburgh' rather than 'Edinburgh, UK')."
+        )
+
+    user_id = db.execute_returning_id(
+        "INSERT INTO users (display_name) VALUES (%s) RETURNING user_id",
+        (trip_name,),
+        id_column="user_id",
+    )
+    trip_id = db.execute_returning_id(
+        """
+        INSERT INTO trips (user_id, trip_name, start_date, end_date,
+                            home_base_destination_id, interests, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING trip_id
+        """,
+        (user_id, trip_name, start_date, end_date, destination_id, interests or [], notes),
+        id_column="trip_id",
+    )
+    return {"trip_id": str(trip_id), "destination_seeded": was_seeded}
+
+
+def add_traveler(
+    trip_id: str,
+    label: str,
+    age_years: float | None = None,
+    mobility_need: str = "none",
+    max_walk_minutes: int | None = None,
+    break_start: time | None = None,
+    break_end: time | None = None,
+    sensory_notes: str | None = None,
+    dietary_restrictions: list[str] | None = None,
+) -> str:
+    """Adds one traveler to an existing trip — call once per person
+    mentioned. Every field except trip_id and label is optional: it's fine
+    to add someone with just a name/label and fill in details later in the
+    conversation as they come up, rather than blocking on complete
+    information up front.
+
+    mobility_need must be one of: none, wheelchair, stroller, limited_walking.
+    Returns the new traveler_id.
+    """
+    return db.execute_returning_id(
+        """
+        INSERT INTO travelers (trip_id, label, age_years, mobility_need,
+                                max_walk_minutes, nap_window_start, nap_window_end,
+                                sensory_notes, dietary_restrictions)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING traveler_id
+        """,
+        (trip_id, label, age_years, mobility_need, max_walk_minutes,
+         break_start, break_end, sensory_notes, dietary_restrictions or []),
+        id_column="traveler_id",
+    )
 
 
 def get_family_walk_budget(trip_id: str, day_date: date) -> int | None:

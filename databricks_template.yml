@@ -7,7 +7,7 @@ variables:
     default: navigo_secrets
   model_serving_endpoint:
     description: Name of the Databricks Model Serving endpoint used by the agent
-    default: databricks-meta-llama-3-70b-instruct
+    default: databricks-meta-llama-3-3-70b-instruct
 
 include:
   - resources/jobs/*.yml
@@ -26,4 +26,4 @@ targets:
     workspace:
       host: https://your-workspace.cloud.databricks.com
     run_as:
-      user_name: your-service-principal-or-user
+      user_name: navigo_ai
