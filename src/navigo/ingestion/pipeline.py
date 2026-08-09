@@ -80,6 +80,16 @@ def refresh_weather(destination_id: str, latitude: float, longitude: float) -> i
             (destination_id, forecast_date, hour, temp_c, precipitation_prob,
              wind_kph, aqi, pm25, uv_index, pollen_level)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (destination_id, forecast_date, hour)
+        DO UPDATE SET
+            temp_c = EXCLUDED.temp_c,
+            precipitation_prob = EXCLUDED.precipitation_prob,
+            wind_kph = EXCLUDED.wind_kph,
+            aqi = EXCLUDED.aqi,
+            pm25 = EXCLUDED.pm25,
+            uv_index = EXCLUDED.uv_index,
+            pollen_level = EXCLUDED.pollen_level,
+            captured_at = now()
         """,
         params_list,
     )
