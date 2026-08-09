@@ -16,6 +16,7 @@ from datetime import date
 from typing import Any
 
 import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from navigo.agent import tools
 from navigo.config import DATABRICKS
@@ -497,6 +498,28 @@ _TOOL_DISPATCH = {
 _MAX_TOOL_ROUNDS = 12
 
 
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """True only for HTTP 429 — REQUEST_LIMIT_EXCEEDED is genuinely transient
+    (Free Edition's pay-per-token endpoints have a modest tokens-per-minute
+    quota, and this payload — 20 tool schemas plus a large system prompt,
+    resent on every round of a multi-round conversation — is heavy enough to
+    hit it in practice). Other errors (400 schema issues, 401/403 auth) are
+    NOT retried here — retrying those would just waste time on something
+    that will never succeed.
+    """
+    return (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and exc.response.status_code == 429
+    )
+
+
+@retry(
+    retry=retry_if_exception(_is_rate_limit_error),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    reraise=True,
+)
 def _call_model_serving(messages: list[dict]) -> dict:
     resp = requests.post(
         f"{DATABRICKS.host}/serving-endpoints/{DATABRICKS.model_serving_endpoint}/invocations",

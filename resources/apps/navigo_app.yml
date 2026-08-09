@@ -10,11 +10,13 @@ resources:
           secret:
             scope: ${var.lakebase_secret_scope}
             key: lakebase_user
+            permission: READ
         - name: lakebase-password
           description: Lakebase password
           secret:
             scope: ${var.lakebase_secret_scope}
             key: lakebase_password
+            permission: READ
         - name: model-serving
           description: Foundation model endpoint used by the planning agent
           serving_endpoint:
