@@ -3,7 +3,16 @@ resources:
     navigo_app:
       name: navigo
       description: Family holiday planner UI — trip setup, itinerary, and the agent's decision log.
-      source_code_path: ../../src/navigo/app
+      # Must be the whole src/ tree, not just src/navigo/app — Databricks
+      # only uploads whatever's under source_code_path, so scoping this to
+      # the app subfolder alone meant the rest of the navigo package
+      # (db/, agent/, ingestion/, config.py) never got deployed at all.
+      # Confirmed by a real deploy: streamlit_app.py landed at
+      # /app/python/source_code/streamlit_app.py — the app's root WAS that
+      # one folder, nothing else existed alongside it. app.yaml also had to
+      # move to src/app.yaml accordingly, since Databricks looks for it at
+      # the root of source_code_path specifically.
+      source_code_path: ../../src
       resources:
         - name: lakebase-user
           description: Lakebase username (see .env.example for the local-dev equivalent)
