@@ -30,8 +30,27 @@ with tab_setup:
     start_date = col1.date_input("Start date")
     end_date = col2.date_input("End date")
 
+    st.subheader("What kind of trip is this?")
+    st.caption(
+        "This is the search_activities_by_interest() query the agent uses — "
+        "see docs/design.md section 5. It's a preference, not a hard filter."
+    )
+    trip_interests = st.multiselect(
+        "Interests",
+        ["museums", "nature & outdoors", "castles & history", "animals & wildlife",
+         "beaches", "playgrounds", "theme parks", "art & culture", "local food"],
+        placeholder="Pick what this family enjoys",
+    )
+    trip_notes = st.text_area(
+        "Anything else worth knowing?",
+        placeholder="e.g. \"we love hands-on science museums, not big on crowds\"",
+    )
+
     st.subheader("Who's coming")
-    st.caption("This drives nap scheduling, walking limits, accessibility filtering, and the packing list.")
+    st.caption(
+        "This drives nap scheduling, walking limits, accessibility filtering, and the "
+        "packing list — these are hard constraints the agent must respect, not preferences."
+    )
 
     if "traveler_rows" not in st.session_state:
         st.session_state.traveler_rows = 1
@@ -57,7 +76,12 @@ with tab_setup:
         st.rerun()
 
     if st.button("Save trip", type="primary"):
-        st.info("Wire this button to insert into `trips` and `travelers` via navigo.db.client — left as a build-out step.")
+        st.info(
+            "Wire this button to insert into `trips` (including interests/notes above) "
+            "and `travelers` via navigo.db.client — left as a build-out step (Phase D "
+            "in docs/BACKLOG.md). The interests/traveler fields above are ready to be "
+            "persisted; this button just doesn't call the DB yet."
+        )
 
 with tab_itinerary:
     st.subheader("Day-by-day itinerary")

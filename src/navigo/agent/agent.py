@@ -12,6 +12,7 @@ Reference: https://docs.databricks.com/aws/en/machine-learning/foundation-models
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 import requests
@@ -20,21 +21,193 @@ from navigo.agent import tools
 from navigo.config import DATABRICKS
 
 SYSTEM_PROMPT = """\
-You are Navigo, a family holiday planning assistant. You plan day-by-day \
-itineraries for families that account for children's nap times, walking \
-limits, food allergies, and mobility/accessibility needs. You never suggest \
-an activity that fails a hard accessibility, age, or dietary requirement. \
-When you reschedule anything, you always explain the reason in plain, warm \
-language a tired parent can read in five seconds. If an activity's \
-accessibility data is unverified, say so rather than asserting it's fine.
+You are Navigo, a family holiday planning assistant. Your job is to build \
+and adjust day-by-day itineraries that genuinely work for the specific \
+family on this trip — not a generic list of tourist attractions.
+
+Before suggesting or scheduling ANYTHING, first call get_trip_destination()
+to get the destination_id — every search and weather tool requires it, and
+it cannot be guessed or inferred from conversation. Then ground yourself in
+the family's actual constraints and preferences using the tools available:
+  - get_travelers — the actual roster: who's coming, ages, mobility needs,
+    dietary restrictions, nap windows, sensory notes. Use this for "who is
+    coming" / "tell me about this trip" questions.
+  - get_accessibility_requirement, get_dietary_restrictions — HARD constraints.
+    Never suggest or schedule an activity that fails these. There is no
+    "close enough": a venue that isn't step-free when a traveler needs a
+    wheelchair, or a restaurant with no safe option for a food allergy, is
+    disqualified, not a compromise.
+  - get_family_walk_budget, get_nap_windows — schedule around these. Don't
+    plan anything during a nap window, and keep each day's total walking
+    within the tightest traveler's budget, not the group average.
+  - get_trip_interests — the family's stated interests/notes. Use this as
+    the search_activities_by_interest() query text (combined with current
+    weather conditions) so choices reflect what THIS family wants, not just
+    what's nearby.
+
+When picking activities: prefer search_activities_by_interest() over
+search_eligible_activities() whenever you have a sense of what the family is
+after — it does semantic matching on top of the same hard filters, so it
+surfaces things that actually fit their interests rather than just
+whatever's in the destination. Fall back to search_eligible_activities() for
+plain browsing by category.
+
+Always check get_weather_and_air_quality() for a day before finalizing
+outdoor plans for it. If rain or poor air quality is forecast, prefer indoor
+alternatives from the start rather than scheduling outdoor activities you'll
+just have to reschedule later.
+
+To build the itinerary, call create_itinerary_item() for each activity you
+place on the schedule. To change your mind, use reschedule_item() to move
+something or delete_itinerary_item() to remove it — always with a clear
+`explanation`/`reason` in plain, warm language a tired parent can read in
+five seconds. Weather-triggered changes must use the matching `trigger`
+value (rain_forecast, high_aqi) so they're logged correctly.
+
+If an activity's accessibility data is unverified (osm_wheelchair is
+"unknown" and this trip has an accessibility requirement), call
+flag_unverified_accessibility() for it rather than asserting it's fine —
+being honest about what you don't know matters more than sounding certain.
+
+The same applies to food. search_eligible_activities() and
+search_activities_by_interest() NEVER hide a restaurant just because its
+dietary safety isn't confirmed — a missing tag means "we don't know," not
+"unsafe," and hiding it would falsely imply nowhere is safe for a family
+with a food allergy. Restaurant results include `dietary_confirmed` (which
+of this trip's restrictions have an explicit matching tag) and
+`dietary_unconfirmed` (which don't). If you schedule a restaurant with any
+`dietary_unconfirmed` entries, call flag_unverified_dietary_safety() for it
+and say plainly in your reply that it isn't confirmed safe — never state or
+imply a restaurant is safe for an allergy you haven't actually confirmed.
+
+When you're done making changes in a turn, summarize what you did and why
+in your reply — don't just call tools silently.
+
+Not every question needs a destination or activity search. Simple questions
+about the trip itself (who's coming, what are the interests, what
+constraints apply) only need trip_id — answer those directly with the
+relevant tool rather than asking for a destination_id you don't actually
+need for the question being asked.
+
+Never ask the user to supply an ID (item_id, activity_id, destination_id)
+that a tool can look up for you. If they refer to something by description
+("the museum visit," "tomorrow's restaurant") rather than an ID, call the
+matching lookup tool first (get_itinerary for existing items,
+get_trip_destination for destination_id) and match it yourself — asking the
+user for an internal database ID is never the right move.
 """
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_trip_interests",
+            "description": "Get the trip's stated interests and free-text notes — the family's preferences, used to build a semantic search query.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_travelers",
+            "description": "Get the full traveler roster for a trip — label, age, mobility need, walk budget, nap window, sensory notes, dietary restrictions. Use this for 'who is coming' / 'tell me about the family' type questions — the other traveler tools only return aggregated constraints, not the roster.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trip_destination",
+            "description": "Get a trip's destination_id, name, and country from its trip_id. REQUIRED before calling search_eligible_activities, search_activities_by_interest, or get_weather_and_air_quality — they all need destination_id, and this is the only way to get it from a trip_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_accessibility_requirement",
+            "description": "Get the strictest mobility need across this trip's travelers (wheelchair/stroller/limited_walking/None). A hard constraint, not a preference.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dietary_restrictions",
+            "description": "Get all dietary restrictions across this trip's travelers (e.g. peanut_allergy, vegetarian). A hard constraint for restaurant choices.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_family_walk_budget",
+            "description": "Get the most restrictive max-walk-minutes across all travelers for a given day.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "day_date": {"type": "string", "format": "date"},
+                },
+                "required": ["trip_id", "day_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_nap_windows",
+            "description": "Get all travelers' nap windows so nothing gets scheduled over them.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_activities_by_interest",
+            "description": "Semantic search for activities matching the family's interests/conditions, restricted to hard-eligible (accessibility/diet) results. Prefer this over search_eligible_activities when you know what the family is after.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                    "query_text": {"type": "string", "description": "Describe what the family wants, e.g. 'outdoor nature activity for young kids, sunny weather' or 'indoor museum, it's raining'."},
+                    "top_k": {"type": "integer"},
+                    "exclude_outdoor": {"type": "boolean"},
+                },
+                "required": ["trip_id", "destination_id", "query_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_eligible_activities",
-            "description": "Find activities at a destination that pass hard accessibility/diet/age filters for this trip's travelers.",
+            "description": "Find activities at a destination that pass hard accessibility/diet filters, without semantic ranking. Use for plain category browsing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -59,6 +232,52 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "forecast_date": {"type": "string", "format": "date"},
                 },
                 "required": ["destination_id", "forecast_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_itinerary",
+            "description": "Get everything currently on the itinerary — item_id, activity name/category, day, time, status. REQUIRED before reschedule_item, delete_itinerary_item, or flag_unverified_accessibility when the user refers to an existing item by description ('the museum visit') rather than giving you an item_id directly — use this to find the real item_id first instead of asking the user for it.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_itinerary_item",
+            "description": "Add an activity to the itinerary at a specific day/time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "activity_id": {"type": "string"},
+                    "day_date": {"type": "string", "format": "date"},
+                    "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
+                },
+                "required": ["trip_id", "activity_id", "day_date", "start_time", "end_time"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_itinerary_item",
+            "description": "Remove an item from the itinerary, with a reason.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "item_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["trip_id", "item_id", "reason"],
             },
         },
     },
@@ -90,6 +309,39 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "flag_unverified_accessibility",
+            "description": "Flag an itinerary item ONLY when its osm_wheelchair status is exactly 'unknown' — never for 'yes' (confirmed accessible) or 'no' (already excluded by hard filters). The tool verifies this itself and will safely no-op if called for a venue that isn't actually unknown, but don't rely on that — only call this when you've genuinely seen wheelchair='unknown' in a search result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "item_id": {"type": "string"},
+                    "activity_name": {"type": "string"},
+                },
+                "required": ["trip_id", "item_id", "activity_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flag_unverified_dietary_safety",
+            "description": "Flag a restaurant ONLY for restrictions that are genuinely unconfirmed (present in the search result's dietary_unconfirmed field, not dietary_confirmed). The tool re-verifies against the actual data itself and will safely no-op if the restrictions you list turn out to already be confirmed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trip_id": {"type": "string"},
+                    "item_id": {"type": "string"},
+                    "activity_name": {"type": "string"},
+                    "unconfirmed_restrictions": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["trip_id", "item_id", "activity_name", "unconfirmed_restrictions"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "build_packing_item",
             "description": "Add a packing list item for a trip, optionally tied to a specific traveler.",
             "parameters": {
@@ -108,11 +360,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 _TOOL_DISPATCH = {
+    "get_trip_interests": tools.get_trip_interests,
+    "get_travelers": tools.get_travelers,
+    "get_trip_destination": tools.get_trip_destination,
+    "get_accessibility_requirement": tools.get_accessibility_requirement,
+    "get_dietary_restrictions": tools.get_dietary_restrictions,
+    "get_family_walk_budget": tools.get_family_walk_budget,
+    "get_nap_windows": tools.get_nap_windows,
+    "search_activities_by_interest": tools.search_activities_by_interest,
     "search_eligible_activities": tools.search_eligible_activities,
     "get_weather_and_air_quality": tools.get_weather_and_air_quality,
+    "get_itinerary": tools.get_itinerary,
+    "create_itinerary_item": tools.create_itinerary_item,
+    "delete_itinerary_item": tools.delete_itinerary_item,
     "reschedule_item": tools.reschedule_item,
+    "flag_unverified_accessibility": tools.flag_unverified_accessibility,
+    "flag_unverified_dietary_safety": tools.flag_unverified_dietary_safety,
     "build_packing_item": tools.build_packing_item,
 }
+
+# Safety valve: caps how many tool-call rounds a single turn can take.
+# Generating a multi-day itinerary genuinely needs several rounds (check
+# constraints, check weather per day, search + create items per day), but an
+# unbounded loop risks spinning forever if the model keeps calling tools
+# without ever producing a final answer.
+_MAX_TOOL_ROUNDS = 12
 
 
 def _call_model_serving(messages: list[dict]) -> dict:
@@ -127,33 +399,58 @@ def _call_model_serving(messages: list[dict]) -> dict:
 
 
 def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None = None) -> str:
-    """Runs one conversational turn: sends the message + tool schemas to the
-    model, executes any requested tool calls, and returns the final text reply.
+    """Runs one conversational turn to completion: sends the message + tool
+    schemas to the model, executes any requested tool calls, feeds results
+    back, and repeats until the model returns a final text answer (or
+    _MAX_TOOL_ROUNDS is hit). Generating a real day-by-day itinerary needs
+    many tool calls across several rounds — checking constraints, checking
+    weather per day, searching and creating items per day — so this can't be
+    a single request/response pair the way it could for a simple lookup.
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history or [])
-    messages.append({"role": "user", "content": f"[trip_id={trip_id}] {user_message}"})
+    # The model has no reliable notion of "today" on its own — its training
+    # data gives it a vague, possibly stale sense of "now" at best. Without
+    # this, any relative date ("tomorrow", "next Tuesday", "this weekend")
+    # is unresolvable or guessed wrong, which silently breaks anything that
+    # calls create_itinerary_item/reschedule_item with a day_date.
+    today_str = date.today().isoformat()
+    messages.append(
+        {
+            "role": "user",
+            "content": f"[trip_id={trip_id}] [today's date is {today_str}] {user_message}",
+        }
+    )
 
-    response = _call_model_serving(messages)
-    choice = response["choices"][0]["message"]
+    for _ in range(_MAX_TOOL_ROUNDS):
+        response = _call_model_serving(messages)
+        choice = response["choices"][0]["message"]
 
-    # Simple single-round tool-call loop; extend to multi-round if needed.
-    tool_calls = choice.get("tool_calls") or []
-    if not tool_calls:
-        return choice.get("content", "")
+        tool_calls = choice.get("tool_calls") or []
+        if not tool_calls:
+            return choice.get("content", "")
 
-    messages.append(choice)
-    for call in tool_calls:
-        fn_name = call["function"]["name"]
-        fn_args = json.loads(call["function"]["arguments"])
-        result = _TOOL_DISPATCH[fn_name](**fn_args)
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": json.dumps(result, default=str),
-            }
-        )
+        messages.append(choice)
+        for call in tool_calls:
+            fn_name = call["function"]["name"]
+            fn_args = json.loads(call["function"]["arguments"])
+            try:
+                result = _TOOL_DISPATCH[fn_name](**fn_args)
+            except Exception as exc:
+                # Feed the error back to the model as a tool result rather
+                # than crashing the whole turn — lets it try a different
+                # approach (e.g. a bad activity_id) instead of losing all
+                # progress made so far in this turn.
+                result = {"error": str(exc)}
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": json.dumps(result, default=str),
+                }
+            )
 
-    final_response = _call_model_serving(messages)
-    return final_response["choices"][0]["message"].get("content", "")
+    return (
+        "I made a lot of changes but ran out of steps before finishing this "
+        "turn — could you ask me to continue, or narrow down what's left?"
+    )

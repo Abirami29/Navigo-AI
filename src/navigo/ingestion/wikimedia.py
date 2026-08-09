@@ -1,8 +1,15 @@
-"""Wikimedia (Wikipedia REST API) client for destination and attraction summaries.
+"""Wikimedia (MediaWiki Action API + Wikipedia REST API) client for
+destination descriptions and nearby attractions.
 
 Used to give the agent narrative context for the "why we picked this" text,
-and as embedding input for semantic retrieval. Docs:
-https://en.wikipedia.org/api/rest_v1/
+and as embedding input for semantic retrieval. Two separate Wikimedia
+surfaces are used here for two different jobs:
+  - Wikipedia REST API (api/rest_v1) — exact-title summary lookups
+  - MediaWiki Action API (w/api.php) — full-text search and geosearch,
+    used to resolve loose place names and to find attractions near a
+    destination's coordinates (the "nearby attractions" requirement)
+Docs: https://en.wikipedia.org/api/rest_v1/ and
+      https://www.mediawiki.org/wiki/API:Main_page
 """
 
 from __future__ import annotations
@@ -21,6 +28,12 @@ _REQUEST_HEADERS = {"User-Agent": "navigo-ai/0.1 (family holiday planner demo)"}
 # fetching its summary, since /page/summary/{title} only does an exact
 # title/redirect match with no fuzzy search of its own.
 _SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
+
+# MediaWiki's legacy Action API — used here specifically for geosearch
+# (list=geosearch), which the newer REST API doesn't expose. Finds Wikipedia
+# articles near a coordinate, which is how we satisfy "nearby attractions"
+# from Wikimedia rather than relying on Overpass for everything.
+_ACTION_API_URL = "https://en.wikipedia.org/w/api.php"
 
 
 @_RETRY
@@ -63,9 +76,9 @@ def _search_best_title(query: str) -> str | None:
 def get_destination_summary(place_name: str) -> str | None:
     """Resolves a plain place name to the best-matching Wikipedia article via
     search, then fetches its summary. This is what upsert_destination() uses
-    (see notebooks/01_ingest_seed_destinations.py) — more robust than
-    get_summary() for arbitrary geocoded names, since it doesn't require an
-    exact title/redirect match, just a reasonable search hit.
+    (see navigo.ingestion.pipeline) — more robust than get_summary() for
+    arbitrary geocoded names, since it doesn't require an exact
+    title/redirect match, just a reasonable search hit.
 
     Still not perfect: for genuinely ambiguous single-word names (e.g. many
     "Lincoln"s worldwide), the top search result may not be the one you
@@ -76,3 +89,41 @@ def get_destination_summary(place_name: str) -> str | None:
     if resolved_title is None:
         return None
     return get_summary(resolved_title)
+
+
+@_RETRY
+def get_nearby_attractions(latitude: float, longitude: float, radius_m: int = 8000, limit: int = 15) -> list[dict]:
+    """Finds Wikipedia articles geographically near a destination —
+    Wikimedia's own version of "nearby attractions," independent of
+    Overpass. Complements rather than replaces Overpass: Overpass gives
+    structured accessibility/kid-friendly tags (wheelchair, changing table),
+    Wikimedia gives richer narrative descriptions for well-known landmarks
+    that OSM's `description` tag is often blank for.
+
+    Returns a list of {title, summary_snippet, distance_m, latitude, longitude},
+    ordered by distance (nearest first).
+    """
+    resp = requests.get(
+        _ACTION_API_URL,
+        params={
+            "action": "query",
+            "list": "geosearch",
+            "gscoord": f"{latitude}|{longitude}",
+            "gsradius": min(radius_m, 10000),  # 10km is the API's hard max
+            "gslimit": limit,
+            "format": "json",
+        },
+        timeout=10,
+        headers=_REQUEST_HEADERS,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("query", {}).get("geosearch", [])
+    return [
+        {
+            "title": r["title"],
+            "distance_m": r.get("dist"),
+            "latitude": r.get("lat"),
+            "longitude": r.get("lon"),
+        }
+        for r in results
+    ]
