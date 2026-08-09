@@ -17,6 +17,15 @@ resources:
             scope: ${var.lakebase_secret_scope}
             key: lakebase_password
             permission: READ
+        - name: lakebase-host
+          description: >
+            Lakebase host — treated as a secret, not a plain value, since
+            it embeds the workspace ID. Never commit the real value into
+            app.yaml/job YAMLs directly.
+          secret:
+            scope: ${var.lakebase_secret_scope}
+            key: lakebase_host
+            permission: READ
         - name: model-serving
           description: Foundation model endpoint used by the planning agent
           serving_endpoint:

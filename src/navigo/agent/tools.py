@@ -16,6 +16,39 @@ from navigo.db import client as db
 from navigo.ingestion.pipeline import get_or_create_destination
 
 
+def _validate_trip_dates(start_date, end_date) -> None:
+    """Defensive check, same pattern as the accessibility/dietary honesty
+    fixes: a real conversation showed the model writing 2024 as the trip
+    year despite being told today's actual date is 2026 in every single
+    message — prompt instructions alone weren't reliable enough to prevent
+    a wrong year silently landing in Lakebase, so it's verified here too.
+    Raises ValueError (caught by the agent loop and fed back as a tool
+    error) rather than a bare failure — lets the model self-correct instead
+    of writing bad data.
+    """
+    today = date.today()
+    try:
+        start = start_date if isinstance(start_date, date) else date.fromisoformat(str(start_date))
+        end = end_date if isinstance(end_date, date) else date.fromisoformat(str(end_date))
+    except ValueError:
+        raise ValueError(
+            f"Dates must be in YYYY-MM-DD format, got start_date={start_date!r} end_date={end_date!r}"
+        )
+
+    # Generous window (1 year back, 3 years forward) — this isn't trying to
+    # be a strict business rule, just to catch the specific failure mode
+    # seen in practice: a plausible-looking but wrong year.
+    earliest_sane = today.replace(year=today.year - 1)
+    latest_sane = today.replace(year=today.year + 3)
+    if not (earliest_sane <= start <= latest_sane):
+        raise ValueError(
+            f"start_date {start.isoformat()} looks wrong given today is {today.isoformat()} — "
+            "likely the wrong year. Re-check the year with the user rather than guessing again."
+        )
+    if end < start:
+        raise ValueError(f"end_date {end.isoformat()} is before start_date {start.isoformat()}.")
+
+
 def create_trip(
     trip_name: str,
     destination_name: str,
@@ -39,6 +72,8 @@ def create_trip(
     system) — trip_name is reused as the display name, matching the pattern
     already used elsewhere for test/demo data.
     """
+    _validate_trip_dates(start_date, end_date)
+
     destination_id, was_seeded = get_or_create_destination(destination_name)
     if destination_id is None:
         raise ValueError(

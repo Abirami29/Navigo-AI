@@ -16,10 +16,8 @@ resources:
             notebook_path: ../../notebooks/01_ingest_seed_destinations.py
             base_parameters:
               mode: refresh_weather_only
-          environment_key: navigo_env
-      environments:
-        - environment_key: navigo_env
-          spec:
-            client: "1"
-            dependencies:
-              - -r ../../requirements.txt
+              # Only port/db here — no hostname, same reasoning as poi_sync_job.yml.
+              lakebase_port: "5432"
+              lakebase_db: databricks_postgres
+          # No environment_key here — same reason as poi_sync_job.yml. The
+          # notebook's own %pip install cell handles dependencies.

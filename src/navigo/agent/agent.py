@@ -42,6 +42,15 @@ you have info for), confirm what you set up in plain language and ask
 anything still needed (e.g. "who else is coming?" or "any accessibility or
 dietary needs I should know about?").
 
+CRITICAL — ask ONE thing at a time. Never bundle multiple questions into a
+single message (e.g. "tell me their ages, mobility needs, dietary
+restrictions, and anything else" is four questions at once — don't do
+this). Ask the single most important thing you need next, wait for the
+answer, then ask the next thing. This applies everywhere you'd naturally
+ask a clarifying question, not just trip creation — one short, specific
+question is easier to answer than a paragraph of them, and a tired parent
+typing on their phone shouldn't have to parse a checklist to reply to you.
+
 Before suggesting or scheduling ANYTHING, first call get_trip_destination()
 to get the destination_id — every search and weather tool requires it, and
 it cannot be guessed or inferred from conversation. Then ground yourself in
@@ -61,6 +70,16 @@ the family's actual constraints and preferences using the tools available:
     traveler's own notes specifically say "nap" — never assume nap by
     default. Keep each day's total walking within the tightest traveler's
     budget, not the group average.
+
+CRITICAL — dates and years: every message tells you today's real date
+explicitly (e.g. "[today's date is 2026-08-09]"). When the user gives a
+date without a year ("20th Aug", "next Tuesday"), you MUST use the CURRENT
+year from that context — never fall back on a year from your training data
+or any other assumption. If the resulting date would already be in the
+past relative to today, use next year instead. When you create or change a
+trip's dates, always state the full date back to the user INCLUDING the
+year, so a wrong year is immediately visible and correctable rather than
+silently wrong in the database.
 
 CRITICAL — walking budget is a TIME limit you must reason about yourself,
 not a filter any search tool applies. get_family_walk_budget() tells you
@@ -492,10 +511,21 @@ _TOOL_DISPATCH = {
 
 # Safety valve: caps how many tool-call rounds a single turn can take.
 # Generating a multi-day itinerary genuinely needs several rounds (check
-# constraints, check weather per day, search + create items per day), but an
-# unbounded loop risks spinning forever if the model keeps calling tools
-# without ever producing a final answer.
-_MAX_TOOL_ROUNDS = 12
+# constraints, check weather per day, search + create items per day — a
+# 5-day trip alone can need 20+ tool calls), but an unbounded loop risks
+# spinning forever if the model keeps calling tools without ever producing
+# a final answer.
+#
+# Raised from 12 -> 20 after real testing showed packed multi-day requests
+# genuinely exhausting 12. This is a real tradeoff, not a free win: every
+# round is a full request to Model Serving, and Free Edition's pay-per-token
+# tokens-per-minute quota is tight enough that this project has already hit
+# 429 REQUEST_LIMIT_EXCEEDED from a single heavy turn (see _is_rate_limit_error
+# below). A higher cap makes that more likely for genuinely large requests,
+# not less — the retry-with-backoff on 429 helps absorb it, but breaking a
+# big request into smaller ones (e.g. "plan day 1", then "day 2") remains
+# the more rate-limit-friendly way to use this in practice.
+_MAX_TOOL_ROUNDS = 20
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -579,6 +609,7 @@ def run_agent_turn(
     )
 
     new_trip_id: str | None = None
+    calls_made: list[str] = []  # tracks what actually happened, for an honest fallback if we run out of steps
 
     for _ in range(_MAX_TOOL_ROUNDS):
         response = _call_model_serving(messages)
@@ -596,6 +627,7 @@ def run_agent_turn(
                 result = _TOOL_DISPATCH[fn_name](**fn_args)
                 if fn_name == "create_trip" and isinstance(result, dict):
                     new_trip_id = result.get("trip_id")
+                calls_made.append(fn_name)
             except Exception as exc:
                 # Feed the error back to the model as a tool result rather
                 # than crashing the whole turn — lets it try a different
@@ -610,10 +642,29 @@ def run_agent_turn(
                 }
             )
 
+    # Ran out of rounds. Naming what actually happened matters — a bare
+    # apology leaves the user with no idea whether "continue" would pick up
+    # real progress or start from scratch. Real writes (create_itinerary_item,
+    # add_traveler, reschedule_item, delete_itinerary_item) are called out
+    # explicitly since those are the ones that actually changed something.
+    # Grouped with counts rather than listed raw — repeating the same tool
+    # name 20 times in a row isn't something a person should have to read.
+    write_tools = {"create_trip", "add_traveler", "create_itinerary_item",
+                   "reschedule_item", "delete_itinerary_item"}
+    write_counts: dict[str, int] = {}
+    for c in calls_made:
+        if c in write_tools:
+            write_counts[c] = write_counts.get(c, 0) + 1
+    if write_counts:
+        summary = ", ".join(f"{name} ×{count}" if count > 1 else name for name, count in write_counts.items())
+        progress_note = f" So far this turn I made these changes: {summary}."
+    else:
+        progress_note = " I hadn't made any changes yet when I ran out of steps."
     return {
         "content": (
-            "I made a lot of changes but ran out of steps before finishing this "
-            "turn — could you ask me to continue, or narrow down what's left?"
+            "This request needed more steps than I could fit in one turn."
+            f"{progress_note} Ask me to continue with what's left, or narrow "
+            "down the request (e.g. one day at a time) to avoid hitting this again."
         ),
         "new_trip_id": new_trip_id,
     }
