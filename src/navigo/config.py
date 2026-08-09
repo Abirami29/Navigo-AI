@@ -49,7 +49,7 @@ class ExternalApiConfig:
         "OPEN_METEO_AIR_QUALITY_URL", "https://air-quality-api.open-meteo.com"
     )
     wikimedia_base_url: str = os.getenv("WIKIMEDIA_BASE_URL", "https://en.wikipedia.org/api/rest_v1")
-    overpass_api_url: str = os.getenv("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
+    overpass_api_url: str = os.getenv("OVERPASS_API_URL", "https://overpass.kumi.systems/api/interpreter")
 
 
 LAKEBASE = LakebaseConfig()
