@@ -48,12 +48,60 @@ databricks secrets get-secret navigo_secrets lakebase_connection --profile navig
 
 pip install -r requirements.txt
 
+cd <your_project_directory>/src
+
+
+Run the below to create the tables in the lakebase database. It will create the tables if they do not exist.
+python -c "from navigo.db.client import apply_schema; apply_schema()"
+
+Run the below inside the src folder to check if the tables were created successfully. It will return a list of tables in the lakebase database.
+
+python -c "
+from navigo.db.client import fetch_all
+tables = fetch_all(\"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name\")
+for t in tables:
+    print(t['table_name'])
+"
+
+List of tables to be in the above step:
+activities
+agent_decisions
+destinations
+itinerary_items
+packing_items
+travelers
+trips
+users
+weather_snapshots
+
+
+---- below didnt work because of passing ", UK" to the geocode function so we just used 'Edinburgh' instead of 'Edinburgh, UK' ----
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.db import client as db
+from navigo.ingestion import open_meteo, wikimedia, overpass
+geo = open_meteo.geocode('Edinburgh, UK')
+print(geo)
+"
 
 
 
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.ingestion import open_meteo
+print(open_meteo.geocode('Edinburgh'))
+"
 
 
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.ingestion import wikimedia
+print(wikimedia.get_summary('New York'))
+"
 
-
-
-databricks secrets create-scope navigo_secrets
+The below errors - testing alternative way to get the API data
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.ingestion import overpass
+print(overpass.fetch_family_pois(55.95206, -3.19648)[:3])
+"

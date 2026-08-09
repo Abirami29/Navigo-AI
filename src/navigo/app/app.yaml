@@ -1,0 +1,21 @@
+# Databricks App runtime configuration.
+# Lives alongside the app's source (source_code_path in
+# resources/apps/navigo_app.yml points here), and is what actually starts
+# the app and wires its environment — separate from that bundle-level
+# resource declaration, which only *declares* what the app can access.
+#
+# `valueFrom` pulls from the `resources:` block declared for this app in
+# resources/apps/navigo_app.yml — the name here ("lakebase") must match the
+# resource's `name` field there. Databricks resolves the secret and injects
+# it as a real env var at runtime; it's never written to disk in plaintext.
+# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/environment-variables
+
+command: ["streamlit", "run", "streamlit_app.py", "--server.port", "$DATABRICKS_APP_PORT"]
+
+env:
+  - name: LAKEBASE_DSN
+    valueFrom: lakebase
+  - name: NAVIGO_MODEL_SERVING_ENDPOINT
+    value: "databricks-meta-llama-3-70b-instruct"   # match resources/apps/navigo_app.yml's model_serving_endpoint var
+  - name: PYTHONPATH
+    value: "../../.."   # so `import navigo` resolves — adjust if your deployed layout differs
