@@ -49,6 +49,13 @@ _CATEGORY_TAG_MAP = {
     "restaurant": ["amenity=restaurant", "amenity=cafe", "amenity=fast_food"],
     "playground": ["leisure=playground"],
     "outdoor": ["leisure=park", "leisure=nature_reserve", "leisure=garden"],
+    # Missing entirely until now: real activities (adult) reported the
+    # agent NEVER suggesting musicals or music-related activities — not a
+    # ranking bug, this category genuinely didn't exist, so no such venue
+    # was ever fetched from Overpass into `activities` in the first place.
+    "entertainment": [
+        "amenity=theatre", "amenity=cinema", "amenity=nightclub", "amenity=arts_centre",
+    ],
 }
 
 _BBOX_DEGREES = 0.09  # roughly ~10km radius, good enough for "in this town"

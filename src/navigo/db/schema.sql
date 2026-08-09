@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS activities (
     destination_id          UUID NOT NULL REFERENCES destinations(destination_id) ON DELETE CASCADE,
     name                      TEXT NOT NULL,
     category                  TEXT NOT NULL
-        CHECK (category IN ('attraction', 'restaurant', 'playground', 'museum', 'outdoor', 'other')),
+        CHECK (category IN ('attraction', 'restaurant', 'playground', 'museum', 'outdoor', 'entertainment', 'other')),
     description                TEXT,
     is_outdoor                 BOOLEAN NOT NULL DEFAULT FALSE,
     latitude                    NUMERIC,

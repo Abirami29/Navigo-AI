@@ -15,6 +15,59 @@ from navigo.agent import retrieval
 from navigo.db import client as db
 from navigo.ingestion.pipeline import get_or_create_destination
 
+# Priority order matches get_accessibility_requirement()'s existing strictness
+# ranking — wheelchair is the most restrictive, checked first.
+_MOBILITY_KEYWORDS = [
+    ("wheelchair", "wheelchair"),
+    ("stroller", "stroller"), ("pushchair", "stroller"), ("pram", "stroller"),
+    ("limited mobility", "limited_walking"), ("limited walking", "limited_walking"),
+]
+# Mapped to the same tag vocabulary Overpass's diet:*=yes tags use, so a
+# parsed restriction actually matches against activities.dietary_tags —
+# a mismatched string here would silently never match anything.
+_DIETARY_KEYWORDS = [
+    ("peanut", "peanut_allergy"), ("tree nut", "nut_allergy"), ("nut allerg", "nut_allergy"),
+    ("gluten", "gluten_free"), ("coeliac", "gluten_free"), ("celiac", "gluten_free"),
+    ("dairy", "dairy_free"), ("lactose", "dairy_free"),
+    ("vegetarian", "vegetarian"), ("vegan", "vegan"),
+    ("shellfish", "shellfish_allergy"), ("egg allerg", "egg_allergy"), ("soy allerg", "soy_allergy"),
+]
+
+
+def parse_constraints_text(text: str) -> dict:
+    """Best-effort keyword parse of a free-text constraints box into the
+    structured fields the hard safety filters actually query
+    (travelers.mobility_need, travelers.dietary_restrictions).
+
+    This exists because a single free-text box is a much nicer UI than a
+    detailed per-person form, but get_accessibility_requirement() and
+    get_dietary_restrictions() query STRUCTURED per-traveler columns, not
+    free text — without this, "constraints in a box" would silently break
+    every hard-filtering fix made earlier (the false-accessibility-claim
+    bug, the dietary-hiding bug). Not a substitute for the raw text: callers
+    should still save the original text too (e.g. as trip notes) so the
+    agent can read full nuance beyond what keyword-matching catches.
+
+    Returns {"mobility_need": str, "dietary_restrictions": list[str]}.
+    Deliberately simple and honest about its limits — a real NLP parse
+    (e.g. via the agent itself) would catch more, but this covers the
+    common, safety-relevant cases without needing a model call just to
+    save a trip.
+    """
+    text_lower = text.lower()
+
+    mobility_need = "none"
+    for keyword, need in _MOBILITY_KEYWORDS:
+        if keyword in text_lower:
+            mobility_need = need
+            break  # first match wins — list is already priority-ordered
+
+    dietary_restrictions = sorted({
+        tag for keyword, tag in _DIETARY_KEYWORDS if keyword in text_lower
+    })
+
+    return {"mobility_need": mobility_need, "dietary_restrictions": dietary_restrictions}
+
 
 def _validate_trip_dates(start_date, end_date) -> None:
     """Defensive check, same pattern as the accessibility/dietary honesty

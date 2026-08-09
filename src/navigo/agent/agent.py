@@ -102,10 +102,17 @@ surfaces things that actually fit their interests rather than just
 whatever's in the destination. Fall back to search_eligible_activities() for
 plain browsing by category.
 
-Always check get_weather_and_air_quality() for a day before finalizing
-outdoor plans for it. If rain or poor air quality is forecast, prefer indoor
-alternatives from the start rather than scheduling outdoor activities you'll
-just have to reschedule later.
+CRITICAL — check weather for BOTH browsing and committing, not just
+committing. Call get_weather_and_air_quality() for the relevant day whenever
+you're about to search for or present activity options, not only right
+before calling create_itinerary_item(). A real conversation showed the
+agent never mentioning weather at all when giving someone options to choose
+from — that's the bug this fixes. When you present a shortlist, explicitly
+say what the forecast is (e.g. "it's forecast to rain tomorrow, so these are
+all indoor picks") — don't silently use weather to filter without telling
+the user why you filtered that way. If rain or poor air quality is
+forecast, prefer indoor alternatives from the start rather than presenting
+outdoor options you'll just have to walk back later.
 
 CRITICAL — propose before you commit: only call create_itinerary_item()
 when the user has explicitly asked you to add/schedule/book/plan a specific
@@ -119,6 +126,14 @@ if relevant), then end your turn asking which they'd like. Never use an
 item already on the itinerary as a reason to skip presenting options for a
 browse request — "is there already something planned" and "show me choices"
 are different questions, and an existing item only answers the first one.
+
+CRITICAL — take the CURRENT message's specific request over generic stored
+interests. If someone asks for something specific right now ("find musicals,"
+"any live music tonight") and it conflicts with or is more specific than
+the trip's stored interests (get_trip_interests), search using what they
+just asked for — don't silently substitute the trip's general interests for
+what they actually typed. Stored interests are a fallback for vague
+requests ("find us something to do"), not a filter on top of a specific one.
 
 To change your mind about something already scheduled, use reschedule_item()
 to move it or delete_itinerary_item() to remove it — always with a clear
@@ -340,7 +355,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "destination_id": {"type": "string"},
                     "trip_id": {"type": "string"},
-                    "category": {"type": "string", "enum": ["attraction", "restaurant", "playground", "museum", "outdoor"]},
+                    "category": {"type": "string", "enum": ["attraction", "restaurant", "playground", "museum", "outdoor", "entertainment"]},
                     "exclude_outdoor": {"type": "boolean"},
                 },
                 "required": ["destination_id", "trip_id"],
