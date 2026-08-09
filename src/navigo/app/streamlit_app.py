@@ -3,13 +3,18 @@
 Deployed via resources/apps/navigo_app.yml. Run locally with:
     streamlit run src/navigo/app/streamlit_app.py
 
-This is a minimal starting UI: trip + traveler setup, itinerary view, and the
-agent's decision log (the "why" trail — see docs/design.md section 4,
-agent_decisions table). Intended to be built out, not a finished product.
+Two tabs by design: Ask Navigo (the only way to create/plan trips now —
+trip creation moved from a form into conversational tool calls, see
+navigo.agent.tools.create_trip) and Itinerary (view + direct edit). The
+decision log ("why it changed") lives as an expander inside Itinerary
+rather than its own tab, so the information isn't lost, just not a
+separate top-level tab. See docs/BACKLOG.md Phase G for the fuller
+conversational-intake vision this is a step toward.
 """
 
 import streamlit as st
 
+from navigo.agent import tools
 from navigo.agent.agent import run_agent_turn
 from navigo.db import client as db
 
@@ -18,99 +23,180 @@ st.set_page_config(page_title="Navigo", page_icon="🧭", layout="wide")
 st.title("🧭 Navigo")
 st.caption("A weather-aware, kid-first, accessibility-first family holiday planner.")
 
-tab_setup, tab_itinerary, tab_chat, tab_log = st.tabs(
-    ["👨‍👩‍👧‍👦 Trip setup", "🗓️ Itinerary", "💬 Ask Navigo", "📋 Why it changed"]
-)
 
-with tab_setup:
-    st.subheader("Trip details")
-    trip_name = st.text_input("Trip name", placeholder="e.g. Half-term in Edinburgh")
-    destination_name = st.text_input("Destination", placeholder="e.g. Edinburgh, UK")
-    col1, col2 = st.columns(2)
-    start_date = col1.date_input("Start date")
-    end_date = col2.date_input("End date")
+def show_error(friendly_message: str, exc: Exception) -> None:
+    """Shows a friendly message by default, with the real error available in
+    an expander rather than dumping a raw traceback into the page.
+    """
+    st.error(friendly_message)
+    with st.expander("Technical details"):
+        st.exception(exc)
 
-    st.subheader("What kind of trip is this?")
-    st.caption(
-        "This is the search_activities_by_interest() query the agent uses — "
-        "see docs/design.md section 5. It's a preference, not a hard filter."
-    )
-    trip_interests = st.multiselect(
-        "Interests",
-        ["museums", "nature & outdoors", "castles & history", "animals & wildlife",
-         "beaches", "playgrounds", "theme parks", "art & culture", "local food"],
-        placeholder="Pick what this family enjoys",
-    )
-    trip_notes = st.text_area(
-        "Anything else worth knowing?",
-        placeholder="e.g. \"we love hands-on science museums, not big on crowds\"",
-    )
 
-    st.subheader("Who's coming")
-    st.caption(
-        "This drives nap scheduling, walking limits, accessibility filtering, and the "
-        "packing list — these are hard constraints the agent must respect, not preferences."
-    )
+if "chat_trip_id" not in st.session_state:
+    st.session_state["chat_trip_id"] = ""
+if "itinerary_trip_id" not in st.session_state:
+    st.session_state["itinerary_trip_id"] = ""
+if "chat_histories" not in st.session_state:
+    st.session_state.chat_histories = {}  # keyed by trip_id, or "__new__" before one exists
 
-    if "traveler_rows" not in st.session_state:
-        st.session_state.traveler_rows = 1
+# Consumed here, before either text_input(key=...) below gets instantiated —
+# writing to a widget's own session_state key AFTER that widget has already
+# rendered in the current script run raises StreamlitAPIException, even
+# right before a st.rerun(). Setting it here, on the fresh run triggered by
+# that rerun, is the one ordering Streamlit actually allows.
+if "pending_trip_id" in st.session_state:
+    _new_id = st.session_state.pop("pending_trip_id")
+    st.session_state["chat_trip_id"] = _new_id
+    st.session_state["itinerary_trip_id"] = _new_id
 
-    for i in range(st.session_state.traveler_rows):
-        with st.expander(f"Traveler {i + 1}", expanded=(i == 0)):
-            c1, c2, c3 = st.columns(3)
-            c1.text_input("Label", key=f"label_{i}", placeholder="e.g. Leo (age 4)")
-            c2.number_input("Age (years)", key=f"age_{i}", min_value=0, max_value=110, step=1)
-            c3.selectbox(
-                "Mobility need", ["none", "wheelchair", "stroller", "limited_walking"], key=f"mobility_{i}"
-            )
-            c4, c5 = st.columns(2)
-            c4.number_input("Max walk (minutes)", key=f"walk_{i}", min_value=0, max_value=300, step=5)
-            c5.text_input("Dietary restrictions (comma-separated)", key=f"diet_{i}")
-            c6, c7 = st.columns(2)
-            c6.time_input("Nap start", key=f"nap_start_{i}", value=None)
-            c7.time_input("Nap end", key=f"nap_end_{i}", value=None)
-            st.text_area("Sensory / other notes", key=f"notes_{i}", placeholder="e.g. avoid loud/crowded venues after 3pm")
-
-    if st.button("+ Add another traveler"):
-        st.session_state.traveler_rows += 1
-        st.rerun()
-
-    if st.button("Save trip", type="primary"):
-        st.info(
-            "Wire this button to insert into `trips` (including interests/notes above) "
-            "and `travelers` via navigo.db.client — left as a build-out step (Phase D "
-            "in docs/BACKLOG.md). The interests/traveler fields above are ready to be "
-            "persisted; this button just doesn't call the DB yet."
-        )
-
-with tab_itinerary:
-    st.subheader("Day-by-day itinerary")
-    st.caption("Populated once a trip exists and the agent has generated a plan.")
-    st.info("Query `itinerary_items` joined to `activities` for the selected trip and render as a day timeline.")
+tab_chat, tab_itinerary = st.tabs(["💬 Ask Navigo", "🗓️ Itinerary"])
 
 with tab_chat:
     st.subheader("Ask Navigo")
-    trip_id = st.text_input("Trip ID", help="Temporary manual input until trip selection UI is built.")
-    user_message = st.chat_input("e.g. \"Move tomorrow's castle visit if it's going to rain\"")
-    if user_message and trip_id:
-        with st.spinner("Navigo is thinking..."):
-            reply = run_agent_turn(trip_id, user_message)
-        st.chat_message("user").write(user_message)
-        st.chat_message("assistant").write(reply)
+    st.caption(
+        "Start a brand-new trip by just describing it — e.g. \"Plan a trip to "
+        "Edinburgh, Aug 10-15, me and my 4 year old, and I need step-free access.\" "
+        "Or paste an existing Trip ID below to keep planning one you already started."
+    )
 
-with tab_log:
-    st.subheader("Why it changed")
-    st.caption("Every reschedule, swap, and accessibility flag the agent makes, in plain language.")
-    trip_id_log = st.text_input("Trip ID ", key="log_trip_id")
-    if trip_id_log:
-        decisions = db.fetch_all(
-            "SELECT decision_type, trigger, explanation, created_at "
-            "FROM agent_decisions WHERE trip_id = %s ORDER BY created_at DESC",
-            (trip_id_log,),
-        )
-        if not decisions:
-            st.write("No decisions logged yet for this trip.")
-        for d in decisions:
-            st.markdown(f"**{d['decision_type']}** · _{d['trigger']}_ · {d['created_at']}")
-            st.write(d["explanation"])
+    trip_id_input = st.text_input("Trip ID (leave blank to start a new trip)", key="chat_trip_id")
+    active_trip_id = trip_id_input or None
+
+    # Conversations that haven't created a trip yet live under a shared
+    # "__new__" bucket; once create_trip() succeeds mid-conversation, that
+    # history gets moved over to the real trip_id (see below) so nothing
+    # said before the trip existed is lost.
+    history_key = active_trip_id or "__new__"
+    if history_key not in st.session_state.chat_histories:
+        st.session_state.chat_histories[history_key] = []
+    history = st.session_state.chat_histories[history_key]
+
+    for msg in history:
+        st.chat_message(msg["role"]).write(msg["content"])
+
+    user_message = st.chat_input(
+        "e.g. \"Plan a trip to Edinburgh, Aug 10-15\" or \"find a museum for tomorrow\""
+    )
+    if user_message:
+        try:
+            with st.spinner("Navigo is thinking..."):
+                result = run_agent_turn(active_trip_id, user_message, history=history)
+
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": result["content"]})
+
+            new_trip_id = result.get("new_trip_id")
+            if new_trip_id and not active_trip_id:
+                # A trip was just created in this turn — move the "__new__"
+                # conversation over to its real trip_id. The actual widget
+                # key updates happen via pending_trip_id at the top of the
+                # script on the next run (see above) — writing directly to
+                # chat_trip_id/itinerary_trip_id here would raise
+                # StreamlitAPIException, since this tab's own text_input for
+                # chat_trip_id has already rendered earlier in this run.
+                st.session_state.chat_histories[new_trip_id] = st.session_state.chat_histories.pop("__new__")
+                st.session_state["pending_trip_id"] = new_trip_id
+
+            st.rerun()
+        except Exception as exc:
+            show_error(
+                "Navigo couldn't complete that request — this is usually a Model Serving "
+                "connection issue (check DATABRICKS_HOST/TOKEN and the endpoint name in .env).",
+                exc,
+            )
+
+with tab_itinerary:
+    st.subheader("Day-by-day itinerary")
+    itinerary_trip_id = st.text_input("Trip ID", key="itinerary_trip_id")
+    if itinerary_trip_id:
+        try:
+            items = db.fetch_all(
+                """
+                SELECT i.item_id, i.day_date, i.start_time, i.end_time, i.status,
+                       i.rescheduled_reason, a.name, a.category, a.osm_wheelchair
+                FROM itinerary_items i
+                JOIN activities a ON a.activity_id = i.activity_id
+                WHERE i.trip_id = %s
+                ORDER BY i.day_date, i.start_time
+                """,
+                (itinerary_trip_id,),
+            )
+        except Exception as exc:
+            items = None
+            show_error("Couldn't load the itinerary — check the Trip ID is correct.", exc)
+
+        if items is not None and not items:
+            st.info(
+                "Nothing on the itinerary yet — use the 'Ask Navigo' tab to ask the agent "
+                "to plan something, e.g. \"find a museum activity for tomorrow.\""
+            )
+        elif items:
+            current_day = None
+            for item in items:
+                if item["day_date"] != current_day:
+                    current_day = item["day_date"]
+                    st.markdown(f"### {current_day.strftime('%A, %d %B %Y')}")
+
+                access_note = " ⚠️ *unverified accessibility*" if item["osm_wheelchair"] == "unknown" else ""
+                status_note = f" _(rescheduled: {item['rescheduled_reason']})_" if item["status"] == "rescheduled" else ""
+
+                row_cols = st.columns([5, 1])
+                row_cols[0].markdown(
+                    f"**{item['start_time'].strftime('%H:%M')}–{item['end_time'].strftime('%H:%M')}** · "
+                    f"{item['name']} _{item['category']}_{access_note}{status_note}"
+                )
+                if row_cols[1].button("🗑️ Remove", key=f"remove_{item['item_id']}"):
+                    try:
+                        tools.delete_itinerary_item(
+                            itinerary_trip_id, str(item["item_id"]),
+                            "Removed directly from the itinerary page.",
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        show_error("Couldn't remove that item.", exc)
+
+                with st.expander("✏️ Change time"):
+                    edit_cols = st.columns([1, 1, 1, 1])
+                    new_day = edit_cols[0].date_input(
+                        "Day", value=item["day_date"], key=f"day_{item['item_id']}"
+                    )
+                    new_start = edit_cols[1].time_input(
+                        "Start", value=item["start_time"], key=f"start_{item['item_id']}"
+                    )
+                    new_end = edit_cols[2].time_input(
+                        "End", value=item["end_time"], key=f"end_{item['item_id']}"
+                    )
+                    if edit_cols[3].button("Save", key=f"save_{item['item_id']}"):
+                        try:
+                            tools.reschedule_item(
+                                itinerary_trip_id, str(item["item_id"]),
+                                new_day, new_start, new_end,
+                                trigger="user_request",
+                                explanation="Time changed directly from the itinerary page.",
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            show_error("Couldn't reschedule that item.", exc)
             st.divider()
+
+        # "Why it changed" folded in here as an expander rather than its own
+        # tab, per the 2-tab layout — same data, just not top-level anymore.
+        with st.expander("📋 Why it changed"):
+            try:
+                decisions = db.fetch_all(
+                    "SELECT decision_type, trigger, explanation, created_at "
+                    "FROM agent_decisions WHERE trip_id = %s ORDER BY created_at DESC",
+                    (itinerary_trip_id,),
+                )
+            except Exception as exc:
+                decisions = None
+                show_error("Couldn't load the decision log.", exc)
+
+            if decisions is not None and not decisions:
+                st.write("No decisions logged yet for this trip.")
+            elif decisions:
+                for d in decisions:
+                    st.markdown(f"**{d['decision_type']}** · _{d['trigger']}_ · {d['created_at']}")
+                    st.write(d["explanation"])
+                    st.divider()

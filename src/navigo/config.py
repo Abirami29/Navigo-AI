@@ -12,6 +12,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _normalize_host(raw: str) -> str:
+    """Ensures a host value has a URL scheme.
+
+    Local .env has always had DATABRICKS_HOST as a full URL
+    (https://dbc-...cloud.databricks.com). A real deployed Databricks App
+    run showed the platform's own auto-injected DATABRICKS_HOST is a bare
+    hostname instead (no scheme) — requests.post() then fails with
+    MissingSchema trying to build a URL from it. Normalizing once here
+    means every DATABRICKS.host consumer (agent.py's Model Serving calls,
+    retrieval.py's Vector Search client) gets a correct URL either way,
+    rather than needing the same defensive check in multiple places.
+    """
+    if not raw or raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw}"
+
+
 @dataclass(frozen=True)
 class LakebaseConfig:
     host: str = os.getenv("LAKEBASE_HOST", "")
@@ -30,7 +47,7 @@ class LakebaseConfig:
 
 @dataclass(frozen=True)
 class DatabricksConfig:
-    host: str = os.getenv("DATABRICKS_HOST", "")
+    host: str = _normalize_host(os.getenv("DATABRICKS_HOST", ""))
     token: str = os.getenv("DATABRICKS_TOKEN", "")
     model_serving_endpoint: str = os.getenv(
         "NAVIGO_MODEL_SERVING_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct"

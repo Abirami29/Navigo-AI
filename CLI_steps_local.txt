@@ -303,3 +303,15 @@ trip_id = b0b372a2-48b5-4835-93da-e346f89a9e96
 Reuse this trip_id to keep testing tools.py functions directly, or in the Streamlit app's 'Ask Navigo' / 'Why it changed' tabs once Model Serving is deployed.
 
 
+----- Deployment to databricks -----
+databricks bundle validate
+
+databricks bundle deploy -t dev --profile navigo-admin
+
+databricks bundle run navigo_poi_sync -t dev --profile navigo-admin
+
+databricks bundle run navigo_weather_refresh -t dev --profile navigo-admin
+
+databricks bundle run navigo_app -t dev --profile navigo-admin
+
+

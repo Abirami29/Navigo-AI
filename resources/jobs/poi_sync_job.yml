@@ -17,10 +17,14 @@ resources:
             notebook_path: ../../notebooks/01_ingest_seed_destinations.py
             base_parameters:
               mode: refresh_poi_only
-          environment_key: navigo_env
-      environments:
-        - environment_key: navigo_env
-          spec:
-            client: "1"
-            dependencies:
-              - -r ../../requirements.txt
+              # Only port/db here — no hostname. The host embeds your
+              # workspace ID and is fetched from the navigo_secrets scope
+              # by the notebook itself, never committed as a plain value.
+              lakebase_port: "5432"
+              lakebase_db: databricks_postgres
+          # No environment_key here deliberately: notebook_task doesn't
+          # support job-level environment blocks (the Jobs API rejects that
+          # combination — this is what caused the "Invalid platform channel
+          # Client-1" deploy failure). Dependencies are installed by the
+          # notebook's own %pip install -r ../requirements.txt cell instead,
+          # which is the correct mechanism for notebook tasks on serverless.

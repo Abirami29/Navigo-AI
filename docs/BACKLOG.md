@@ -62,3 +62,19 @@ the rest can move around based on what you want to prove out next.
 ---
 
 **Suggested order if you want one:** finish Phase A this session → Phase C (it's the actual core feature) → Phase D just enough to demo Phase C → Phase E once there's something worth deploying → Phase B and F can be picked up opportunistically alongside any of the above.
+
+## Phase G — Conversational-first redesign (parked, not started)
+
+User's stated vision, captured directly rather than paraphrased into something smaller:
+
+> "I feel it should go from where they would like to go and then the date and then optional restrictions. It's not nice to have to input everything for everyone. The optional restrictions should be parsed by AI to feed into the planning... I want it to be free text to get the interests, restrictions, and what they are looking for. Frontend could be the itinerary page and Ask Navigo page. In Ask Navigo they should type what they want as free text. From that the agent should ask more questions if necessary and give options for the trip itinerary. Once chosen, then can be added to the itinerary page. From the itinerary page they can reorder, remove, or add their own itinerary."
+
+Breaking that into concrete pieces for whenever this gets picked up:
+
+- [ ] Replace the structured trip-setup form with a conversational intake: destination + dates first, then free-text "who's coming and any restrictions" parsed by the agent into `travelers` rows — not a rigid per-person form up front
+- [ ] Group composition shouldn't assume "the whole family every time" — needs to work equally well for "us three plus the kids" and "four adults, a friends' trip," without forcing users through an "exclude people" flow
+- [ ] "Ask Navigo" becomes the primary planning surface: free-text request → agent asks clarifying questions if it needs them → presents options → user picks → *then* it lands on the itinerary. (The immediate version of "present options before committing" was fixed directly in the system prompt as of the "find activities" bug — this Phase G item is the fuller vision: multi-turn clarification before even the first option gets presented, not just gating the final commit step.)
+- [ ] Itinerary page becomes editable directly — reorder, remove, or manually add items without going through chat at all
+- [ ] Real transit/travel-mode data (nearest public transport, how the family gets around) was raised alongside this — explicitly decided NOT to build as structured data (no Overpass transit query, no schema field) and instead folded into the free-text/clarifying-question flow above, where the agent can ask and reason about it conversationally rather than needing a real data source
+
+This is a genuinely different shape of product than the current form-based scaffold — worth treating as its own design pass rather than incremental patches to the existing Streamlit form.

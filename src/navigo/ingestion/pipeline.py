@@ -212,3 +212,35 @@ def seed_destination(name: str) -> dict:
         "weather_rows": n_weather,
         "poi_candidates": n_poi,
     }
+
+
+def get_or_create_destination(raw_name: str) -> tuple[str | None, bool]:
+    """Looks up a destination by name; seeds it fresh (full pipeline: weather,
+    AQI, Overpass POIs) only if it doesn't already exist. Returns
+    (destination_id, was_newly_seeded) — destination_id is None if geocoding
+    the name fails entirely.
+
+    This closes a real gap: until this existed, nothing in the app actually
+    triggered seeding — a user typing a brand-new city into the trip setup
+    form would silently do nothing, since only manually running a notebook
+    or script ever created a `destinations` row. This is what
+    streamlit_app.py's "Save trip" button calls.
+
+    Deliberately checks existence BEFORE calling the full seed_destination()
+    pipeline — re-running weather/AQI/Overpass for an already-seeded city on
+    every single "Save trip" click would be slow (Overpass alone can take
+    10-30+ seconds) and wasteful of Overpass's shared public quota.
+    """
+    geo = open_meteo.geocode(raw_name)
+    if geo is None:
+        return None, False
+
+    existing = db.fetch_one(
+        "SELECT destination_id FROM destinations WHERE name = %s AND country = %s",
+        (geo.name, geo.country),
+    )
+    if existing:
+        return existing["destination_id"], False
+
+    result = seed_destination(raw_name)
+    return result["destination_id"], True

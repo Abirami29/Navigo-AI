@@ -13,6 +13,123 @@ from datetime import date, time
 
 from navigo.agent import retrieval
 from navigo.db import client as db
+from navigo.ingestion.pipeline import get_or_create_destination
+
+
+def _validate_trip_dates(start_date, end_date) -> None:
+    """Defensive check, same pattern as the accessibility/dietary honesty
+    fixes: a real conversation showed the model writing 2024 as the trip
+    year despite being told today's actual date is 2026 in every single
+    message — prompt instructions alone weren't reliable enough to prevent
+    a wrong year silently landing in Lakebase, so it's verified here too.
+    Raises ValueError (caught by the agent loop and fed back as a tool
+    error) rather than a bare failure — lets the model self-correct instead
+    of writing bad data.
+    """
+    today = date.today()
+    try:
+        start = start_date if isinstance(start_date, date) else date.fromisoformat(str(start_date))
+        end = end_date if isinstance(end_date, date) else date.fromisoformat(str(end_date))
+    except ValueError:
+        raise ValueError(
+            f"Dates must be in YYYY-MM-DD format, got start_date={start_date!r} end_date={end_date!r}"
+        )
+
+    # Generous window (1 year back, 3 years forward) — this isn't trying to
+    # be a strict business rule, just to catch the specific failure mode
+    # seen in practice: a plausible-looking but wrong year.
+    earliest_sane = today.replace(year=today.year - 1)
+    latest_sane = today.replace(year=today.year + 3)
+    if not (earliest_sane <= start <= latest_sane):
+        raise ValueError(
+            f"start_date {start.isoformat()} looks wrong given today is {today.isoformat()} — "
+            "likely the wrong year. Re-check the year with the user rather than guessing again."
+        )
+    if end < start:
+        raise ValueError(f"end_date {end.isoformat()} is before start_date {start.isoformat()}.")
+
+
+def create_trip(
+    trip_name: str,
+    destination_name: str,
+    start_date: date,
+    end_date: date,
+    interests: list[str] | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Creates a brand-new trip from a conversational description — this is
+    what lets trip creation happen entirely through chat instead of a
+    separate form. Looks up (or fully seeds, if new) the destination via
+    get_or_create_destination, same as the old Streamlit "Save trip" form
+    used, so a never-before-seen city still gets real weather/accessibility
+    data, not just a bare row.
+
+    Returns {"trip_id": ..., "destination_seeded": bool} — the caller (the
+    agent orchestration loop) captures trip_id specifically so the UI can
+    learn about a trip that didn't exist when the conversation started.
+
+    Creates a bare `users` row alongside the trip (Navigo has no real auth
+    system) — trip_name is reused as the display name, matching the pattern
+    already used elsewhere for test/demo data.
+    """
+    _validate_trip_dates(start_date, end_date)
+
+    destination_id, was_seeded = get_or_create_destination(destination_name)
+    if destination_id is None:
+        raise ValueError(
+            f"Couldn't find '{destination_name}' — try a plain city name "
+            "without a country suffix (e.g. 'Edinburgh' rather than 'Edinburgh, UK')."
+        )
+
+    user_id = db.execute_returning_id(
+        "INSERT INTO users (display_name) VALUES (%s) RETURNING user_id",
+        (trip_name,),
+        id_column="user_id",
+    )
+    trip_id = db.execute_returning_id(
+        """
+        INSERT INTO trips (user_id, trip_name, start_date, end_date,
+                            home_base_destination_id, interests, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING trip_id
+        """,
+        (user_id, trip_name, start_date, end_date, destination_id, interests or [], notes),
+        id_column="trip_id",
+    )
+    return {"trip_id": str(trip_id), "destination_seeded": was_seeded}
+
+
+def add_traveler(
+    trip_id: str,
+    label: str,
+    age_years: float | None = None,
+    mobility_need: str = "none",
+    max_walk_minutes: int | None = None,
+    break_start: time | None = None,
+    break_end: time | None = None,
+    sensory_notes: str | None = None,
+    dietary_restrictions: list[str] | None = None,
+) -> str:
+    """Adds one traveler to an existing trip — call once per person
+    mentioned. Every field except trip_id and label is optional: it's fine
+    to add someone with just a name/label and fill in details later in the
+    conversation as they come up, rather than blocking on complete
+    information up front.
+
+    mobility_need must be one of: none, wheelchair, stroller, limited_walking.
+    Returns the new traveler_id.
+    """
+    return db.execute_returning_id(
+        """
+        INSERT INTO travelers (trip_id, label, age_years, mobility_need,
+                                max_walk_minutes, nap_window_start, nap_window_end,
+                                sensory_notes, dietary_restrictions)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING traveler_id
+        """,
+        (trip_id, label, age_years, mobility_need, max_walk_minutes,
+         break_start, break_end, sensory_notes, dietary_restrictions or []),
+        id_column="traveler_id",
+    )
 
 
 def get_family_walk_budget(trip_id: str, day_date: date) -> int | None:
@@ -30,11 +147,20 @@ def get_family_walk_budget(trip_id: str, day_date: date) -> int | None:
     return min(r["max_walk_minutes"] for r in rows)
 
 
-def get_nap_windows(trip_id: str) -> list[dict]:
-    """Returns all travelers' nap windows so the agent avoids scheduling over them."""
+def get_break_windows(trip_id: str) -> list[dict]:
+    """Returns all travelers' scheduled break windows (nap, lunch, rest,
+    medication — whatever they noted) so the agent avoids scheduling over
+    them. Aliased to break_start/break_end in the query specifically so the
+    model never sees the literal word "nap" in the data — a real run showed
+    it explaining every reschedule as a "nap conflict" even for an adult's
+    lunch break, because the raw tool output had nap_window_start/end as key
+    names, which is a stronger source of that wording than any docstring.
+    The underlying DB columns are still named nap_window_start/end — only
+    what's actually shown to the LLM changed, not the schema.
+    """
     return db.fetch_all(
         """
-        SELECT label, nap_window_start, nap_window_end
+        SELECT label, nap_window_start AS break_start, nap_window_end AS break_end
         FROM travelers
         WHERE trip_id = %s AND nap_window_start IS NOT NULL
         """,
@@ -84,21 +210,22 @@ def get_trip_interests(trip_id: str) -> dict:
 
 def get_travelers(trip_id: str) -> list[dict]:
     """Returns the full traveler roster — label, age, mobility need, walk
-    budget, nap window, sensory notes, dietary restrictions — for everyone
-    on the trip. This is the "who is coming" answer.
+    budget, scheduled break window, sensory notes, dietary restrictions —
+    for everyone on the trip. This is the "who is coming" answer.
 
     Every other traveler-related tool (get_accessibility_requirement,
-    get_dietary_restrictions, get_family_walk_budget, get_nap_windows)
+    get_dietary_restrictions, get_family_walk_budget, get_break_windows)
     returns an aggregated/derived constraint across all travelers, not the
-    roster itself, and get_nap_windows only returns travelers who HAVE a
-    nap window set — so none of them alone (or together) can answer "who is
-    on this trip." This was a real gap: the agent had no way to answer that
-    question at all until this tool existed.
+    roster itself, and get_break_windows only returns travelers who HAVE a
+    break window set — so none of them alone (or together) can answer "who
+    is on this trip." This was a real gap: the agent had no way to answer
+    that question at all until this tool existed.
     """
     return db.fetch_all(
         """
         SELECT label, age_years, mobility_need, max_walk_minutes,
-               nap_window_start, nap_window_end, sensory_notes, dietary_restrictions
+               nap_window_start AS break_start, nap_window_end AS break_end,
+               sensory_notes, dietary_restrictions
         FROM travelers
         WHERE trip_id = %s
         """,
@@ -127,6 +254,24 @@ def get_trip_destination(trip_id: str) -> dict | None:
         """,
         (trip_id,),
     )
+
+
+def list_seeded_destinations() -> list[dict]:
+    """Returns every destination Navigo actually has real data for —
+    geocoded, weather/AQI fetched, Overpass POIs pulled.
+
+    This exists so the agent can tell the difference between a destination
+    it has verified data about and one it only "knows" from general
+    training knowledge. A real run showed the agent confidently naming
+    specific wheelchair-accessible attractions in cities that were never
+    seeded — Rijksmuseum, Dublin Zoo, Tivoli Gardens — with the exact same
+    confident tone as genuinely OSM-verified Edinburgh venues. That's the
+    same false-safety-claim failure mode already fixed for individual
+    activities, just relocated to an entire destination that was never
+    checked at all. See the system prompt's rule requiring this tool be
+    called before discussing any destination's accessibility.
+    """
+    return db.fetch_all("SELECT name, country FROM destinations ORDER BY name")
 
 
 def _apply_hard_filters(rows: list[dict], trip_id: str) -> list[dict]:
@@ -371,7 +516,7 @@ def reschedule_item(
     """Moves an itinerary item and logs the decision to agent_decisions.
 
     trigger must be one of the CHECK-constrained values in schema.sql
-    (rain_forecast, high_aqi, nap_conflict, walk_budget_exceeded,
+    (rain_forecast, high_aqi, break_conflict, walk_budget_exceeded,
     unverified_accessibility, user_request).
     """
     db.execute(
