@@ -12,6 +12,7 @@ Reference: https://docs.databricks.com/aws/en/machine-learning/foundation-models
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 import requests
@@ -24,8 +25,13 @@ You are Navigo, a family holiday planning assistant. Your job is to build \
 and adjust day-by-day itineraries that genuinely work for the specific \
 family on this trip — not a generic list of tourist attractions.
 
-Before suggesting or scheduling ANYTHING, always ground yourself in the \
-family's actual constraints and preferences using the tools available:
+Before suggesting or scheduling ANYTHING, first call get_trip_destination()
+to get the destination_id — every search and weather tool requires it, and
+it cannot be guessed or inferred from conversation. Then ground yourself in
+the family's actual constraints and preferences using the tools available:
+  - get_travelers — the actual roster: who's coming, ages, mobility needs,
+    dietary restrictions, nap windows, sensory notes. Use this for "who is
+    coming" / "tell me about this trip" questions.
   - get_accessibility_requirement, get_dietary_restrictions — HARD constraints.
     Never suggest or schedule an activity that fails these. There is no
     "close enough": a venue that isn't step-free when a traveler needs a
@@ -76,6 +82,19 @@ imply a restaurant is safe for an allergy you haven't actually confirmed.
 
 When you're done making changes in a turn, summarize what you did and why
 in your reply — don't just call tools silently.
+
+Not every question needs a destination or activity search. Simple questions
+about the trip itself (who's coming, what are the interests, what
+constraints apply) only need trip_id — answer those directly with the
+relevant tool rather than asking for a destination_id you don't actually
+need for the question being asked.
+
+Never ask the user to supply an ID (item_id, activity_id, destination_id)
+that a tool can look up for you. If they refer to something by description
+("the museum visit," "tomorrow's restaurant") rather than an ID, call the
+matching lookup tool first (get_itinerary for existing items,
+get_trip_destination for destination_id) and match it yourself — asking the
+user for an internal database ID is never the right move.
 """
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -84,6 +103,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_trip_interests",
             "description": "Get the trip's stated interests and free-text notes — the family's preferences, used to build a semantic search query.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_travelers",
+            "description": "Get the full traveler roster for a trip — label, age, mobility need, walk budget, nap window, sensory notes, dietary restrictions. Use this for 'who is coming' / 'tell me about the family' type questions — the other traveler tools only return aggregated constraints, not the roster.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trip_destination",
+            "description": "Get a trip's destination_id, name, and country from its trip_id. REQUIRED before calling search_eligible_activities, search_activities_by_interest, or get_weather_and_air_quality — they all need destination_id, and this is the only way to get it from a trip_id.",
             "parameters": {
                 "type": "object",
                 "properties": {"trip_id": {"type": "string"}},
@@ -195,6 +238,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_itinerary",
+            "description": "Get everything currently on the itinerary — item_id, activity name/category, day, time, status. REQUIRED before reschedule_item, delete_itinerary_item, or flag_unverified_accessibility when the user refers to an existing item by description ('the museum visit') rather than giving you an item_id directly — use this to find the real item_id first instead of asking the user for it.",
+            "parameters": {
+                "type": "object",
+                "properties": {"trip_id": {"type": "string"}},
+                "required": ["trip_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_itinerary_item",
             "description": "Add an activity to the itinerary at a specific day/time.",
             "parameters": {
@@ -255,7 +310,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "flag_unverified_accessibility",
-            "description": "Flag that an itinerary item's accessibility data is unverified OSM data, when this trip has an accessibility requirement.",
+            "description": "Flag an itinerary item ONLY when its osm_wheelchair status is exactly 'unknown' — never for 'yes' (confirmed accessible) or 'no' (already excluded by hard filters). The tool verifies this itself and will safely no-op if called for a venue that isn't actually unknown, but don't rely on that — only call this when you've genuinely seen wheelchair='unknown' in a search result.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -271,7 +326,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "flag_unverified_dietary_safety",
-            "description": "Flag that a restaurant on the itinerary has no confirmed data for one or more of this trip's dietary restrictions. Use whenever scheduling a restaurant that has dietary_unconfirmed entries from search results.",
+            "description": "Flag a restaurant ONLY for restrictions that are genuinely unconfirmed (present in the search result's dietary_unconfirmed field, not dietary_confirmed). The tool re-verifies against the actual data itself and will safely no-op if the restrictions you list turn out to already be confirmed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -306,6 +361,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 _TOOL_DISPATCH = {
     "get_trip_interests": tools.get_trip_interests,
+    "get_travelers": tools.get_travelers,
+    "get_trip_destination": tools.get_trip_destination,
     "get_accessibility_requirement": tools.get_accessibility_requirement,
     "get_dietary_restrictions": tools.get_dietary_restrictions,
     "get_family_walk_budget": tools.get_family_walk_budget,
@@ -313,6 +370,7 @@ _TOOL_DISPATCH = {
     "search_activities_by_interest": tools.search_activities_by_interest,
     "search_eligible_activities": tools.search_eligible_activities,
     "get_weather_and_air_quality": tools.get_weather_and_air_quality,
+    "get_itinerary": tools.get_itinerary,
     "create_itinerary_item": tools.create_itinerary_item,
     "delete_itinerary_item": tools.delete_itinerary_item,
     "reschedule_item": tools.reschedule_item,
@@ -351,7 +409,18 @@ def run_agent_turn(trip_id: str, user_message: str, history: list[dict] | None =
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history or [])
-    messages.append({"role": "user", "content": f"[trip_id={trip_id}] {user_message}"})
+    # The model has no reliable notion of "today" on its own — its training
+    # data gives it a vague, possibly stale sense of "now" at best. Without
+    # this, any relative date ("tomorrow", "next Tuesday", "this weekend")
+    # is unresolvable or guessed wrong, which silently breaks anything that
+    # calls create_itinerary_item/reschedule_item with a day_date.
+    today_str = date.today().isoformat()
+    messages.append(
+        {
+            "role": "user",
+            "content": f"[trip_id={trip_id}] [today's date is {today_str}] {user_message}",
+        }
+    )
 
     for _ in range(_MAX_TOOL_ROUNDS):
         response = _call_model_serving(messages)

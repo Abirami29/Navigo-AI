@@ -33,7 +33,7 @@ class DatabricksConfig:
     host: str = os.getenv("DATABRICKS_HOST", "")
     token: str = os.getenv("DATABRICKS_TOKEN", "")
     model_serving_endpoint: str = os.getenv(
-        "NAVIGO_MODEL_SERVING_ENDPOINT", "databricks-meta-llama-3-70b-instruct"
+        "NAVIGO_MODEL_SERVING_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct"
     )
     vector_search_endpoint: str = os.getenv("NAVIGO_VECTOR_SEARCH_ENDPOINT", "navigo_vector_endpoint")
     vector_index: str = os.getenv("NAVIGO_VECTOR_INDEX", "navigo.default.activities_index")
