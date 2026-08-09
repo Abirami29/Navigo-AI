@@ -23,17 +23,24 @@ the rest can move around based on what you want to prove out next.
 ## Phase C — Missing agent capabilities (the actual planning logic)
 *This is the biggest real gap — right now the agent can't build or edit a plan from scratch.*
 
-- [ ] **`create_itinerary_item()`** — no tool currently inserts new `itinerary_items` rows; only `reschedule_item()` (moves existing ones) exists. Without this, "generate a day-by-day itinerary" has nothing to write with.
-- [ ] **`delete_itinerary_item()`** — "remove" from the brief's "add, remove, or move" isn't built
-- [ ] **`search_activities_by_interest()`** — the Vector Search index gets built (`02_build_vector_index.py`) but nothing ever queries it. `search_eligible_activities()` only does hard SQL filtering, no semantic retrieval. This is the actual "retrieve based on interests" requirement from the design doc, currently unimplemented.
-- [ ] Embed `travelers.sensory_notes` (user notes) into the vector index — currently only `destinations`/`activities` text gets embedded, per the design doc's "embed... user notes" requirement
-- [ ] Wire weather/AQI into retrieval automatically, rather than relying on the LLM to remember to pass `exclude_outdoor=True` itself
-- [ ] Extend `agent.py`'s tool-call loop from single-round to multi-round (currently one request → tool calls → one follow-up; a real planning conversation will need more turns than that)
-- [ ] Decide whether rescheduling should ever run proactively (a scheduled check against fresh weather data) vs. only reactively when the user asks in chat — currently it's chat-triggered only
-- [ ] Wire `flag_unverified_accessibility()` into the itinerary-building flow — the function exists but nothing calls it yet
+- [x] **`create_itinerary_item()`** — done (src/navigo/agent/tools.py)
+- [x] **`delete_itinerary_item()`** — done, logs with item_id=NULL + activity name folded into the explanation (agent_decisions.item_id is a FK into itinerary_items, can't reference a deleted row)
+- [x] **`search_activities_by_interest()`** — done (src/navigo/agent/retrieval.py + tools.py). Queries the Vector Search index, degrades to hard-filter-only browsing if the index is unreachable.
+- [ ] Embed `travelers.sensory_notes` into the vector index — deliberately NOT done this way. Redesigned instead: sensory_notes/interests are used as the *query* text at search time (see `get_trip_interests` + the agent's system prompt), not embedded as separate indexed documents. This is the correct RAG pattern — notes describe what the family wants, not a venue, so they don't belong in the same corpus as destination/activity descriptions.
+- [x] Wire weather/AQI into retrieval — the system prompt now explicitly instructs the agent to check weather before finalizing outdoor plans and to fold current conditions into the `search_activities_by_interest` query text. Still LLM-enforced, not code-enforced — see note below.
+- [x] Extend `agent.py`'s tool-call loop to multi-round — done, capped at `_MAX_TOOL_ROUNDS = 12` per turn as a safety valve
+- [ ] Proactive (scheduled, non-chat-triggered) rescheduling — still not built, still a real design decision to make later
+- [x] Wire `flag_unverified_accessibility()` into the flow — added to the agent's tool list and system prompt instructions, not auto-triggered in Python (relies on the LLM calling it)
+
+**New this pass, not originally in the backlog:**
+- [x] `trips.interests` / `trips.notes` columns — nothing previously captured "preferences" at all
+- [x] Wikimedia `get_nearby_attractions()` (geosearch) — the brief named "nearby attractions" as a Wikimedia responsibility; only descriptions were ever implemented. Now used as a best-effort description enrichment for Overpass POIs that came back with no description.
+- [x] Streamlit trip-setup form now has interest/notes fields (still not wired to the DB — that's Phase D)
+
+**Known limitation worth naming honestly**: constraint-following (accessibility, diet, weather-awareness) is enforced two different ways here — hard filters in `tools.py` (`_apply_hard_filters`) are enforced in code and cannot be bypassed, but weather-awareness and interest-matching are enforced by the system prompt, which means they're *strong instructions to the model*, not guarantees. An LLM can still ignore a "check the weather first" instruction. If that turns out to matter in practice, the fix is moving more of that logic into Python (e.g., have `create_itinerary_item` itself check weather and refuse/warn on a bad pairing) rather than trusting the prompt alone.
 
 ## Phase D — Streamlit UI
-- [ ] Wire the "Save trip" button to actually insert into `trips` and `travelers` (currently a stub with an `st.info()` placeholder)
+- [ ] Wire the "Save trip" button to actually insert into `trips` and `travelers` (now needs to include the interests/notes fields too — form UI is ready, DB call still isn't)
 - [ ] Build the itinerary timeline view — query `itinerary_items` joined to `activities`, currently just a placeholder message
 - [ ] Replace the manual "type in a Trip ID" text inputs with a real trip picker once trips can be saved
 

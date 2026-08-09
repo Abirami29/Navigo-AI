@@ -96,6 +96,37 @@ def refresh_weather(destination_id: str, latitude: float, longitude: float) -> i
     return len(merged)
 
 
+def _enrich_descriptions_from_wikimedia(pois: list[dict], latitude: float, longitude: float) -> None:
+    """Mutates `pois` in place: for attraction/museum POIs with no description,
+    tries to match them by name against nearby Wikipedia articles (geosearch)
+    and fills in a summary. Silently skipped (not raised) on any Wikimedia
+    failure — POI ingestion from Overpass shouldn't fail because a narrative
+    enrichment step timed out.
+    """
+    needs_enrichment = [
+        p for p in pois
+        if p["category"] in ("attraction", "museum") and not p.get("description")
+    ]
+    if not needs_enrichment:
+        return
+
+    try:
+        nearby = wikimedia.get_nearby_attractions(latitude, longitude)
+    except Exception:
+        return  # best-effort — don't let a Wikimedia hiccup break POI ingestion
+
+    nearby_by_title = {n["title"].lower(): n["title"] for n in nearby}
+
+    for poi in needs_enrichment:
+        matched_title = nearby_by_title.get(poi["name"].lower())
+        if matched_title is None:
+            continue
+        try:
+            poi["description"] = wikimedia.get_summary(matched_title)
+        except Exception:
+            continue  # leave description as-is (None) rather than fail the whole batch
+
+
 def refresh_poi(destination_id: str, latitude: float, longitude: float) -> int:
     """Fetches family/accessibility-tagged POIs from Overpass and inserts new
     ones into `activities`. Returns the number of POI candidates processed
@@ -105,6 +136,13 @@ def refresh_poi(destination_id: str, latitude: float, longitude: float) -> int:
     Batched: one query to fetch all existing names for this destination,
     then one execute_many() for the new rows — instead of a
     fetch_one()+execute() round trip pair per individual POI.
+
+    Attraction/museum descriptions Overpass left blank get a best-effort
+    enrichment from Wikimedia's geosearch (see wikimedia.get_nearby_attractions)
+    — this is what satisfies "Wikimedia... nearby attractions" from the
+    product brief, complementing Overpass's structured accessibility tags
+    rather than replacing them. Best-effort and non-fatal: if Wikimedia is
+    unreachable, POIs still get written, just without the extra description.
     """
     pois = overpass.fetch_family_pois(latitude, longitude)
     if not pois:
@@ -116,6 +154,8 @@ def refresh_poi(destination_id: str, latitude: float, longitude: float) -> int:
     existing_names = {r["name"] for r in existing_rows}
 
     new_pois = [p for p in pois if p["name"] not in existing_names]
+    _enrich_descriptions_from_wikimedia(new_pois, latitude, longitude)
+
     params_list = [
         (
             destination_id, poi["name"], poi["category"], poi["description"],

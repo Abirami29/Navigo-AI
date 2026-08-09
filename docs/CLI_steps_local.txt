@@ -126,3 +126,101 @@ rows = fetch_all('''
     GROUP BY category ORDER BY n DESC
 ''')
 for r in rows: print(r)
+
+
+import execute
+execute('ALTER TABLE agent_decisions DROP CONSTRAINT agent_decisions_item_id_fkey')
+execute('''ALTER TABLE agent_decisions ADD CONSTRAINT agent_decisions_item_id_fkey
+    FOREIGN KEY (item_id) REFERENCES itinerary_items(item_id) ON DELETE SET NULL''')
+execute('ALTER TABLE itinerary_items DROP CONSTRAINT itinerary_items_original_item_id_fkey')
+execute('''ALTER TABLE itinerary_items ADD CONSTRAINT itinerary_items_original_item_id_fkey
+    FOREIGN KEY (original_item_id) REFERENCES itinerary_items(item_id) ON DELETE SET NULL''')
+print('Migration applied.')
+"
+Migration applied.
+
+
+python phase_c_smoke_test.py
+
+============================================================
+0. Look up the seeded destination
+============================================================
+Using destination: Edinburgh (a35ff349-57b9-44b1-8a19-13add1eb1d41)
+
+============================================================
+1. Create a test user + trip
+============================================================
+Created trip: 2fa3616a-485b-4d55-9476-fded1c372624
+
+============================================================
+2. Add travelers with real, mixed constraints
+============================================================
+Added 3 travelers: Mum (no constraints), Grandpa (wheelchair, 90min walk budget), Leo (age 4, stroller, nap 1:00-2:30pm, peanut allergy, sensory-sensitive)
+
+============================================================
+3. Read back the hard constraints exactly as the agent would see them
+============================================================
+get_trip_interests: {'interests': ['museums', 'castles & history', 'animals & wildlife'], 'notes': 'We love hands-on science museums, not big on crowds.'}
+get_accessibility_requirement (expect 'wheelchair' — the strictest): wheelchair
+get_dietary_restrictions (expect ['peanut_allergy']): ['peanut_allergy']
+get_family_walk_budget (expect 60 — Leo's, the lowest/most restrictive): 60
+get_nap_windows (expect Leo, 13:00-14:30): [{'label': 'Leo (age 4)', 'nap_window_start': datetime.time(13, 0), 'nap_window_end': datetime.time(14, 30)}]
+
+============================================================
+4. search_eligible_activities — hard filters only, no semantic ranking
+============================================================
+Eligible restaurants (must be wheelchair-accessible AND peanut-safe): 0
+  (0 is plausible, not necessarily a bug — your earlier data check showed only ~14% of restaurants are tagged wheelchair=yes, and peanut-safe tagging is rarer still in OSM. This is honest data scarcity, not broken filtering.)
+
+============================================================
+5. search_activities_by_interest — semantic search + the SAME hard filters
+============================================================
+(Falls back to hard-filter-only browsing if Vector Search isn't deployed yet — expected until you've done Phase E. Check which path it took below.)
+Got 5 results:
+  South Viewpoint | attraction | wheelchair=unknown
+  Rest and Be Thankful | attraction | wheelchair=unknown
+  Talbot Rice Gallery | museum | wheelchair=yes
+  Gilmerton Cove | attraction | wheelchair=unknown
+  The Buckstane | attraction | wheelchair=unknown
+
+============================================================
+6. create_itinerary_item — the tool that didn't exist before this pass
+============================================================
+Created itinerary item 0c9cb95f-77ce-480c-9655-1f32ecc5261a for 'South Viewpoint' at 10:00-11:30
+Flagged as unverified accessibility (osm_wheelchair was 'unknown')
+
+============================================================
+7. delete_itinerary_item — the other tool that didn't exist before
+============================================================
+Deleted item 0c9cb95f-77ce-480c-9655-1f32ecc5261a
+
+============================================================
+8. build_packing_item — unchanged, confirming it still works
+============================================================
+Added a packing item
+
+============================================================
+9. agent_decisions — the full audit trail from this run
+============================================================
+  [accessibility_flag/unverified_accessibility] Accessibility info for 'South Viewpoint' comes from OpenStreetMap and hasn't been manually verified — worth a quick check or call ahead before you rely on it.
+  [remove/user_request] Removed 'South Viewpoint': testing the delete tool
+
+============================================================
+Done
+============================================================
+trip_id = 2fa3616a-485b-4d55-9476-fded1c372624
+Reuse this trip_id to keep testing tools.py functions directly, or in the Streamlit app's 'Ask Navigo' / 'Why it changed' tabs once Model Serving is deployed.
+
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.db.client import execute
+execute('ALTER TABLE agent_decisions DROP CONSTRAINT agent_decisions_decision_type_check')
+execute('''ALTER TABLE agent_decisions ADD CONSTRAINT agent_decisions_decision_type_check
+    CHECK (decision_type IN (\'reschedule\', \'swap\', \'remove\', \'packing_suggestion\', \'accessibility_flag\', \'dietary_flag\'))''')
+execute('ALTER TABLE agent_decisions DROP CONSTRAINT agent_decisions_trigger_check')
+execute('''ALTER TABLE agent_decisions ADD CONSTRAINT agent_decisions_trigger_check
+    CHECK (trigger IN (\'rain_forecast\', \'high_aqi\', \'nap_conflict\', \'walk_budget_exceeded\',
+                        \'unverified_accessibility\', \'unverified_dietary_safety\', \'user_request\'))''')
+print('Migration applied.')
+"
+Migration applied.
