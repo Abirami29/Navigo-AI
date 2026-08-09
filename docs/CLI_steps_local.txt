@@ -1,0 +1,59 @@
+
+brew trust hashicorp/tap
+brew trust --formula databricks/tap/databricks
+
+brew tap databricks/tap && brew install databricks
+
+pip install databricks-cli
+
+
+Create a Databricks account and generate a personal access token (PAT) from the user settings page.
+click on the icon in the top right corner of the Databricks workspace, select "User Settings", then navigate to the "Access Tokens" tab and click "Generate New Token". Copy the generated token and save it securely.
+
+
+
+databricks configure --token
+
+databricks host: <your-databricks-host>
+
+databricks token: <your_personal_access_token>
+
+/opt/homebrew/bin/databricks auth login --host <your-databricks-host>
+
+profile name: navigo-admin
+
+then authenticata in the browser using the databricks account login details
+
+it will say Profile navigo-admin was successfully saved
+
+databricks secrets create-scope navigo_secrets
+
+then choose navigo-admin as the profile to use for the secret scope creation
+
+
+databricks secrets put-secret navigo_secrets lakebase_connection
+
+then choose navigo-admin as the profile to use for the secret creation
+
+go to lakebase_connection and make sure you choose the role as navigo_ai (or the one you created) and copy the connection string from the lakebase connection details page and paste it in the prompt to create the secret
+Note: the connection string should be in the format: jdbc:postgresql://<host>:<port>/<database>?user=<username
+Note: if you didnt choose navigo_ai as the role it will only give you temporary access to connect to default profile which is wrong
+
+
+databricks secrets list-secrets navigo_secrets --profile navigo-admin
+
+databricks secrets get-secret navigo_secrets lakebase_connection --profile navigo-admin
+
+databricks secrets get-secret navigo_secrets lakebase_connection --profile navigo-admin --output json | jq -r .value | base64 -d
+
+pip install -r requirements.txt
+
+
+
+
+
+
+
+
+
+databricks secrets create-scope navigo_secrets

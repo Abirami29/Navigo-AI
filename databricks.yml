@@ -18,11 +18,12 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://your-workspace.cloud.databricks.com
+      host: https://dbc-075872da-bdef.cloud.databricks.com
+      profile: navigo-admin
 
   prod:
     mode: production
     workspace:
-      host: https://your-workspace.cloud.databricks.com
+      host: https://dbc-075872da-bdef.cloud.databricks.com
     run_as:
       user_name: your-service-principal-or-user
