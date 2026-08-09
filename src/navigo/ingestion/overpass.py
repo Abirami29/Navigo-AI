@@ -55,6 +55,12 @@ _BBOX_DEGREES = 0.09  # roughly ~10km radius, good enough for "in this town"
 
 
 def _bbox(latitude: float, longitude: float, delta: float = _BBOX_DEGREES) -> str:
+    # Defensive cast: Postgres NUMERIC columns come back from psycopg as
+    # Decimal, not float, and Decimal - float raises TypeError. Open-Meteo's
+    # geocoding API returns plain floats, so this only bites once lat/lon has
+    # round-tripped through Lakebase — cast here so it can't resurface for
+    # any future caller that queries coordinates back out of the DB.
+    latitude, longitude = float(latitude), float(longitude)
     south, north = latitude - delta, latitude + delta
     west, east = longitude - delta, longitude + delta
     return f"{south},{west},{north},{east}"
@@ -66,15 +72,22 @@ def _build_query(latitude: float, longitude: float) -> str:
     clauses = []
     for tag in all_tags:
         key, _, value = tag.partition("=")
-        clauses.append(f'  node["{key}"="{value}"]({bbox});')
+        # nwr = node + way + relation. Restaurants/cafes are almost always
+        # mapped as single points (nodes), but parks, playgrounds, and many
+        # larger attractions are mapped as ways (polygon boundaries) or
+        # relations (multi-part areas) — querying node-only silently missed
+        # nearly all of those categories.
+        clauses.append(f'  nwr["{key}"="{value}"]({bbox});')
     tag_clauses = "\n".join(clauses)
-    # Overpass QL: fetch nodes matching any of our category tags, with tag output
+    # "out center;" adds a representative center coordinate for way/relation
+    # results (which have no single lat/lon of their own) while still giving
+    # nodes their normal coordinates directly — see _extract_coords below.
     return f"""
 [out:json][timeout:25];
 (
 {tag_clauses}
 );
-out body;
+out center;
 """
 
 
@@ -115,6 +128,18 @@ def _post_query(query: str) -> dict:
     raise last_error
 
 
+def _extract_coords(el: dict) -> tuple[float | None, float | None]:
+    """Nodes carry lat/lon directly; ways/relations only get a coordinate at
+    all because the query uses "out center;" — their coords live under
+    el['center'] instead. Falls back to (None, None) if neither is present
+    (shouldn't happen given "out center;", but better than a KeyError).
+    """
+    if "lat" in el and "lon" in el:
+        return el["lat"], el["lon"]
+    center = el.get("center") or {}
+    return center.get("lat"), center.get("lon")
+
+
 def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
     """Fetches POIs near a destination with family/accessibility-relevant tags.
 
@@ -132,6 +157,10 @@ def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
         if not name or not category:
             continue
 
+        poi_lat, poi_lon = _extract_coords(el)
+        if poi_lat is None or poi_lon is None:
+            continue  # no usable coordinate — skip rather than write a null-location row
+
         wheelchair = tags.get("wheelchair", "unknown")
         if wheelchair not in ("yes", "limited", "no"):
             wheelchair = "unknown"
@@ -148,8 +177,8 @@ def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
                 "category": category,
                 "description": tags.get("description"),
                 "is_outdoor": category in ("playground", "outdoor"),
-                "latitude": el.get("lat"),
-                "longitude": el.get("lon"),
+                "latitude": poi_lat,
+                "longitude": poi_lon,
                 "osm_wheelchair": wheelchair,
                 "has_accessible_toilet": _yes_no(tags.get("toilets:wheelchair")),
                 "has_changing_table": _yes_no(tags.get("changing_table")),

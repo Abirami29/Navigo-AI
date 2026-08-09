@@ -14,17 +14,65 @@ from navigo.config import EXTERNAL_APIS
 
 _RETRY = retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
 
+_REQUEST_HEADERS = {"User-Agent": "navigo-ai/0.1 (family holiday planner demo)"}
+
+# MediaWiki's search endpoint — a different base URL from the summary REST API
+# above. Used to resolve a plain place name to a real article title before
+# fetching its summary, since /page/summary/{title} only does an exact
+# title/redirect match with no fuzzy search of its own.
+_SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
+
 
 @_RETRY
 def get_summary(title: str) -> str | None:
-    """Returns a short plain-text summary for a place title, or None if not found."""
+    """Returns a short plain-text summary for an EXACT Wikipedia page title
+    (or a real redirect to one), or None if no such page exists.
+
+    This only works when `title` is already a real article/redirect title —
+    it does not search. For a plain place name that might not match exactly,
+    use get_destination_summary() instead, which searches first.
+    """
     resp = requests.get(
         f"{EXTERNAL_APIS.wikimedia_base_url}/page/summary/{requests.utils.quote(title)}",
         timeout=10,
-        headers={"User-Agent": "navigo-ai/0.1 (family holiday planner demo)"},
+        headers=_REQUEST_HEADERS,
     )
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
     data = resp.json()
     return data.get("extract")
+
+
+@_RETRY
+def _search_best_title(query: str) -> str | None:
+    """Searches Wikipedia and returns the top-matching article's real title,
+    or None if nothing matched.
+    """
+    resp = requests.get(
+        _SEARCH_URL,
+        params={"q": query, "limit": 1},
+        timeout=10,
+        headers=_REQUEST_HEADERS,
+    )
+    resp.raise_for_status()
+    pages = resp.json().get("pages", [])
+    return pages[0]["title"] if pages else None
+
+
+def get_destination_summary(place_name: str) -> str | None:
+    """Resolves a plain place name to the best-matching Wikipedia article via
+    search, then fetches its summary. This is what upsert_destination() uses
+    (see notebooks/01_ingest_seed_destinations.py) — more robust than
+    get_summary() for arbitrary geocoded names, since it doesn't require an
+    exact title/redirect match, just a reasonable search hit.
+
+    Still not perfect: for genuinely ambiguous single-word names (e.g. many
+    "Lincoln"s worldwide), the top search result may not be the one you
+    meant. Worth revisiting alongside the geocoding ambiguity fix in the
+    backlog (Phase B) if that turns out to matter in practice.
+    """
+    resolved_title = _search_best_title(place_name)
+    if resolved_title is None:
+        return None
+    return get_summary(resolved_title)
