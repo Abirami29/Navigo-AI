@@ -129,6 +129,24 @@ def get_trip_destination(trip_id: str) -> dict | None:
     )
 
 
+def list_seeded_destinations() -> list[dict]:
+    """Returns every destination Navigo actually has real data for —
+    geocoded, weather/AQI fetched, Overpass POIs pulled.
+
+    This exists so the agent can tell the difference between a destination
+    it has verified data about and one it only "knows" from general
+    training knowledge. A real run showed the agent confidently naming
+    specific wheelchair-accessible attractions in cities that were never
+    seeded — Rijksmuseum, Dublin Zoo, Tivoli Gardens — with the exact same
+    confident tone as genuinely OSM-verified Edinburgh venues. That's the
+    same false-safety-claim failure mode already fixed for individual
+    activities, just relocated to an entire destination that was never
+    checked at all. See the system prompt's rule requiring this tool be
+    called before discussing any destination's accessibility.
+    """
+    return db.fetch_all("SELECT name, country FROM destinations ORDER BY name")
+
+
 def _apply_hard_filters(rows: list[dict], trip_id: str) -> list[dict]:
     """The hard-filter half of context engineering, factored out so both
     search_eligible_activities() (pure SQL filtering) and

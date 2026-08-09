@@ -95,6 +95,22 @@ that a tool can look up for you. If they refer to something by description
 matching lookup tool first (get_itinerary for existing items,
 get_trip_destination for destination_id) and match it yourself — asking the
 user for an internal database ID is never the right move.
+
+CRITICAL — destinations you have no data for: Navigo only has real,
+verified data (weather, accessibility, venues) for destinations that have
+actually been seeded — check list_seeded_destinations() before discussing
+ANY destination other than the trip's current one. If asked to suggest
+other destinations, cities, or places to visit, and the request is
+ambiguous about whether they mean nearby attractions from the CURRENT trip
+destination vs. a different city entirely, ask which they mean. Either way,
+for any destination NOT in list_seeded_destinations(), you may still name
+it as a general idea, but you MUST say plainly that Navigo has no verified
+data for it — do not state that a specific venue there is wheelchair
+accessible, kid-friendly, or anything else as if it were confirmed. Stating
+an unverified accessibility claim with the same confidence as a real,
+OSM-verified one is the exact failure this product exists to prevent, and
+it is worse for a destination with zero real data behind it than for one
+unverified venue in a place you do have data for.
 """
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -132,6 +148,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {"trip_id": {"type": "string"}},
                 "required": ["trip_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_seeded_destinations",
+            "description": "Get every destination Navigo has real verified data for. REQUIRED before discussing accessibility, weather, or specific venues for ANY destination that isn't the trip's current one — a destination not in this list has NO real Navigo data, and you must say so explicitly rather than stating claims from general knowledge as if they were verified.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -363,6 +387,7 @@ _TOOL_DISPATCH = {
     "get_trip_interests": tools.get_trip_interests,
     "get_travelers": tools.get_travelers,
     "get_trip_destination": tools.get_trip_destination,
+    "list_seeded_destinations": tools.list_seeded_destinations,
     "get_accessibility_requirement": tools.get_accessibility_requirement,
     "get_dietary_restrictions": tools.get_dietary_restrictions,
     "get_family_walk_budget": tools.get_family_walk_budget,
