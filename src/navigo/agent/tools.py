@@ -8,6 +8,7 @@ framework in agent.py, so the core logic isn't tied to any one framework.
 
 from __future__ import annotations
 
+import re
 from datetime import date, time
 
 from navigo.agent import retrieval
@@ -153,6 +154,34 @@ def search_eligible_activities(
     return _apply_hard_filters(rows, trip_id)
 
 
+def _keyword_fallback_rank(rows: list[dict], query_text: str, top_k: int) -> list[dict]:
+    """Poor-man's relevance ranking, used ONLY when Vector Search is
+    unreachable — scores each activity by how many query words appear in
+    its name/category/description, then sorts by that score.
+
+    Without this, the fallback was returning whatever rows Postgres happened
+    to return first, with no relevance to query_text at all — since
+    restaurants vastly outnumber every other category in real data (70:1 or
+    worse), that meant a query for "museum" silently returned restaurants
+    instead, every time, until Vector Search is deployed. Not a substitute
+    for real semantic search, but meaningfully better than arbitrary row
+    order — a "museum" query now actually prefers rows whose category or
+    name contains "museum".
+    """
+    query_words = {w for w in re.findall(r"\w+", query_text.lower()) if len(w) > 2}
+    if not query_words:
+        return rows[:top_k]
+
+    def score(row: dict) -> int:
+        haystack = " ".join(
+            filter(None, [row.get("name", ""), row.get("category", ""), row.get("description") or ""])
+        ).lower()
+        return sum(1 for w in query_words if w in haystack)
+
+    scored = sorted(rows, key=score, reverse=True)
+    return scored[:top_k]
+
+
 def search_activities_by_interest(
     trip_id: str,
     destination_id: str,
@@ -170,16 +199,18 @@ def search_activities_by_interest(
     stated interests/notes (see get_trip_interests) plus, when relevant,
     current conditions ("indoor activity, it's raining" / "outdoor, good
     weather") so retrieval reflects both interests AND conditions, per the
-    product brief. Falls back to search_eligible_activities() (no semantic
-    ranking, just hard filters) if the vector index is unreachable, so a
-    Vector Search outage degrades gracefully instead of blocking planning.
+    product brief. Falls back to a keyword-relevance ranking (see
+    _keyword_fallback_rank) if the vector index is unreachable, so a Vector
+    Search outage degrades gracefully instead of returning arbitrary,
+    query-irrelevant results.
     """
     ranked_ids = retrieval.semantic_search_activities(query_text, destination_id, top_k=top_k * 2)
 
     if not ranked_ids:
-        # Vector Search unreachable/empty — degrade to hard-filter-only browsing.
+        # Vector Search unreachable/empty — degrade to keyword relevance
+        # rather than whatever order the database happens to return.
         rows = search_eligible_activities(destination_id, trip_id, exclude_outdoor=exclude_outdoor)
-        return rows[:top_k]
+        return _keyword_fallback_rank(rows, query_text, top_k)
 
     rows = db.fetch_all(
         "SELECT * FROM activities WHERE activity_id = ANY(%s)", (ranked_ids,)
