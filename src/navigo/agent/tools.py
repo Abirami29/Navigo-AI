@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, time
 
+from navigo.agent import retrieval
 from navigo.db import client as db
 
 
@@ -69,35 +70,30 @@ def get_accessibility_requirement(trip_id: str) -> str | None:
     return None
 
 
-def search_eligible_activities(
-    destination_id: str,
-    trip_id: str,
-    category: str | None = None,
-    exclude_outdoor: bool = False,
-) -> list[dict]:
-    """Hard-filters activities by accessibility, age, and diet BEFORE any semantic ranking.
+def get_trip_interests(trip_id: str) -> dict:
+    """Returns the trip's stated interests and free-text notes — the
+    "preferences" from the product brief. Used to build the semantic search
+    query in search_activities_by_interest(), not as a hard filter.
+    """
+    row = db.fetch_one("SELECT interests, notes FROM trips WHERE trip_id = %s", (trip_id,))
+    if row is None:
+        return {"interests": [], "notes": None}
+    return {"interests": row["interests"] or [], "notes": row["notes"]}
 
-    This ordering is deliberate: a well-matched activity that isn't step-free
-    or nut-free isn't a near-miss, it's disqualifying. See docs/design.md
-    section 5 (Context engineering).
+
+def _apply_hard_filters(rows: list[dict], trip_id: str) -> list[dict]:
+    """The hard-filter half of context engineering, factored out so both
+    search_eligible_activities() (pure SQL filtering) and
+    search_activities_by_interest() (semantic results filtered afterward)
+    apply IDENTICAL accessibility/diet rules. A well-matched activity that
+    isn't step-free or nut-free isn't a near-miss, it's disqualifying — see
+    docs/design.md section 5.
     """
     accessibility_need = get_accessibility_requirement(trip_id)
     dietary_restrictions = get_dietary_restrictions(trip_id)
 
-    query = "SELECT * FROM activities WHERE destination_id = %s"
-    params: list = [destination_id]
-
     if accessibility_need in ("wheelchair", "stroller"):
-        query += " AND osm_wheelchair != 'no'"
-
-    if exclude_outdoor:
-        query += " AND is_outdoor = FALSE"
-
-    if category:
-        query += " AND category = %s"
-        params.append(category)
-
-    rows = db.fetch_all(query, tuple(params))
+        rows = [r for r in rows if r["osm_wheelchair"] != "no"]
 
     if dietary_restrictions:
         rows = [
@@ -110,6 +106,79 @@ def search_eligible_activities(
     return rows
 
 
+def search_eligible_activities(
+    destination_id: str,
+    trip_id: str,
+    category: str | None = None,
+    exclude_outdoor: bool = False,
+) -> list[dict]:
+    """Hard-filters activities by accessibility, age, and diet BEFORE any semantic ranking.
+
+    This ordering is deliberate: a well-matched activity that isn't step-free
+    or nut-free isn't a near-miss, it's disqualifying. See docs/design.md
+    section 5 (Context engineering).
+
+    Use this for browsing/listing by category. For "find activities matching
+    what this family is actually interested in," use
+    search_activities_by_interest() instead, which adds semantic ranking on
+    top of these same hard filters.
+    """
+    query = "SELECT * FROM activities WHERE destination_id = %s"
+    params: list = [destination_id]
+
+    if exclude_outdoor:
+        query += " AND is_outdoor = FALSE"
+
+    if category:
+        query += " AND category = %s"
+        params.append(category)
+
+    rows = db.fetch_all(query, tuple(params))
+    return _apply_hard_filters(rows, trip_id)
+
+
+def search_activities_by_interest(
+    trip_id: str,
+    destination_id: str,
+    query_text: str,
+    top_k: int = 10,
+    exclude_outdoor: bool = False,
+) -> list[dict]:
+    """Semantic search over the activities Vector Search index, restricted to
+    hard-eligible activities for this trip's travelers. This is the "retrieve
+    suitable activities based on interests" half of context engineering that
+    was previously missing entirely — search_eligible_activities() alone
+    only does column filtering, never anything based on meaning.
+
+    `query_text` should describe what the family is after — pass the trip's
+    stated interests/notes (see get_trip_interests) plus, when relevant,
+    current conditions ("indoor activity, it's raining" / "outdoor, good
+    weather") so retrieval reflects both interests AND conditions, per the
+    product brief. Falls back to search_eligible_activities() (no semantic
+    ranking, just hard filters) if the vector index is unreachable, so a
+    Vector Search outage degrades gracefully instead of blocking planning.
+    """
+    ranked_ids = retrieval.semantic_search_activities(query_text, destination_id, top_k=top_k * 2)
+
+    if not ranked_ids:
+        # Vector Search unreachable/empty — degrade to hard-filter-only browsing.
+        rows = search_eligible_activities(destination_id, trip_id, exclude_outdoor=exclude_outdoor)
+        return rows[:top_k]
+
+    rows = db.fetch_all(
+        "SELECT * FROM activities WHERE activity_id = ANY(%s)", (ranked_ids,)
+    )
+    rows_by_id = {r["activity_id"]: r for r in rows}
+    # Preserve the vector search's relevance order — the SQL ANY() above does not.
+    ordered_rows = [rows_by_id[i] for i in ranked_ids if i in rows_by_id]
+
+    eligible = _apply_hard_filters(ordered_rows, trip_id)
+    if exclude_outdoor:
+        eligible = [r for r in eligible if not r["is_outdoor"]]
+
+    return eligible[:top_k]
+
+
 def get_weather_and_air_quality(destination_id: str, forecast_date: date) -> list[dict]:
     return db.fetch_all(
         """
@@ -120,6 +189,55 @@ def get_weather_and_air_quality(destination_id: str, forecast_date: date) -> lis
         """,
         (destination_id, forecast_date),
     )
+
+
+def create_itinerary_item(
+    trip_id: str,
+    activity_id: str,
+    day_date: date,
+    start_time: time,
+    end_time: time,
+) -> str:
+    """Adds a new activity to the itinerary. This was the actual missing
+    piece behind "generate a day-by-day itinerary" — reschedule_item() could
+    only ever move a row that already existed; nothing could create the
+    first one. Returns the new item_id.
+    """
+    return db.execute_returning_id(
+        """
+        INSERT INTO itinerary_items (trip_id, activity_id, day_date, start_time, end_time, status)
+        VALUES (%s, %s, %s, %s, %s, 'planned')
+        RETURNING item_id
+        """,
+        (trip_id, activity_id, day_date, start_time, end_time),
+        id_column="item_id",
+    )
+
+
+def delete_itinerary_item(trip_id: str, item_id: str, reason: str) -> None:
+    """Removes an item from the itinerary — the "remove" from "add, remove,
+    or move itinerary items," which previously had no tool at all.
+
+    Logs with item_id=NULL rather than the deleted item's id: agent_decisions
+    has a foreign key into itinerary_items, so a decision row can't reference
+    a row that no longer exists (and logging before deleting doesn't help —
+    the FK would then block the delete instead). The removed activity's name
+    gets folded into the explanation text so the audit trail stays
+    meaningful without depending on a reference that can't survive the delete.
+    """
+    item = db.fetch_one(
+        """
+        SELECT a.name AS activity_name
+        FROM itinerary_items i
+        JOIN activities a ON a.activity_id = i.activity_id
+        WHERE i.item_id = %s
+        """,
+        (item_id,),
+    )
+    activity_name = item["activity_name"] if item else "an itinerary item"
+
+    db.execute("DELETE FROM itinerary_items WHERE item_id = %s", (item_id,))
+    log_decision(trip_id, None, "remove", "user_request", f"Removed '{activity_name}': {reason}")
 
 
 def reschedule_item(

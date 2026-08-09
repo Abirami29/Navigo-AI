@@ -19,6 +19,13 @@ CREATE TABLE IF NOT EXISTS trips (
     home_base_destination_id UUID,
     status                    TEXT NOT NULL DEFAULT 'planning'
         CHECK (status IN ('planning', 'active', 'completed')),
+    -- "Preferences" from the product brief: free-text interests the agent
+    -- uses as the semantic search query when picking activities (see
+    -- navigo.agent.retrieval.semantic_search_activities). Age/mobility/diet/
+    -- sensory constraints live on `travelers` instead, since those are hard
+    -- per-person filters, not soft interest signals.
+    interests                 TEXT[] NOT NULL DEFAULT '{}',  -- e.g. {museums, hiking, castles, animals}
+    notes                      TEXT,                          -- free-text trip notes, folded into the search query too
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -92,7 +99,7 @@ CREATE TABLE IF NOT EXISTS itinerary_items (
     status                      TEXT NOT NULL DEFAULT 'planned'
         CHECK (status IN ('planned', 'rescheduled', 'cancelled')),
     rescheduled_reason         TEXT,
-    original_item_id            UUID REFERENCES itinerary_items(item_id),
+    original_item_id            UUID REFERENCES itinerary_items(item_id) ON DELETE SET NULL,
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -136,9 +143,9 @@ CREATE TABLE IF NOT EXISTS packing_items (
 CREATE TABLE IF NOT EXISTS agent_decisions (
     decision_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     trip_id                UUID NOT NULL REFERENCES trips(trip_id) ON DELETE CASCADE,
-    item_id                  UUID REFERENCES itinerary_items(item_id),
+    item_id                  UUID REFERENCES itinerary_items(item_id) ON DELETE SET NULL,
     decision_type              TEXT NOT NULL
-        CHECK (decision_type IN ('reschedule', 'swap', 'packing_suggestion', 'accessibility_flag')),
+        CHECK (decision_type IN ('reschedule', 'swap', 'remove', 'packing_suggestion', 'accessibility_flag')),
     trigger                     TEXT NOT NULL
         CHECK (trigger IN ('rain_forecast', 'high_aqi', 'nap_conflict', 'walk_budget_exceeded',
                             'unverified_accessibility', 'user_request')),
