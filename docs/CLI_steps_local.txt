@@ -105,3 +105,24 @@ import sys; sys.path.insert(0, 'src')
 from navigo.ingestion import overpass
 print(overpass.fetch_family_pois(55.95206, -3.19648)[:3])
 "
+
+
+Testing the whole pipeline:
+
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.ingestion.pipeline import seed_destination
+result = seed_destination('Edinburgh')
+print(result)
+
+python -c "
+import sys; sys.path.insert(0, 'src')
+from navigo.db.client import fetch_all
+rows = fetch_all('''
+    SELECT category, COUNT(*) as n,
+           COUNT(*) FILTER (WHERE osm_wheelchair = 'yes') as wheelchair_yes,
+           COUNT(*) FILTER (WHERE has_changing_table) as changing_tables
+    FROM activities
+    GROUP BY category ORDER BY n DESC
+''')
+for r in rows: print(r)
