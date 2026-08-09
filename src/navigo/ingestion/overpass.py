@@ -5,9 +5,18 @@ Pulls POIs (attractions, restaurants, playgrounds, museums) within a bounding
 box around a destination, along with tags relevant to families:
   wheelchair, toilets:wheelchair, changing_table, highchair, diet:*
 
-Etiquette: Overpass's public instance is a shared community resource. This
+Etiquette: Overpass's public instances are a shared community resource. This
 client is designed to be called from the scheduled poi_sync_job, not live
 per user request — see resources/jobs/poi_sync_job.yml.
+
+Mirror fallback: overpass-api.de has been intermittently rejecting requests
+with 406 Not Acceptable since the operator started filtering traffic that
+looks programmatic (documented widely in the OSM community forum through
+2025-2026), and a User-Agent header alone isn't reliably enough to avoid it
+anymore. This client tries your configured URL first, then falls back to
+known-working public mirrors, rather than failing outright on one server's
+bad day. See https://community.openstreetmap.org/t/overpass-api-error-406
+
 Docs: https://wiki.openstreetmap.org/wiki/Overpass_API
 """
 
@@ -19,6 +28,19 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from navigo.config import EXTERNAL_APIS
 
 _RETRY = retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+
+_REQUEST_HEADERS = {
+    "User-Agent": "navigo-ai/0.1 (family holiday planner demo; contact via GitHub repo)",
+    "Accept": "application/json",
+}
+
+# Fallback mirrors, tried in order if the configured URL (first entry) fails.
+# Deduplicated at call time in case OVERPASS_API_URL is already one of these.
+_FALLBACK_MIRRORS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
 
 # OSM amenity/tourism/leisure values we care about, mapped to Navigo's activity category
 _CATEGORY_TAG_MAP = {
@@ -33,6 +55,12 @@ _BBOX_DEGREES = 0.09  # roughly ~10km radius, good enough for "in this town"
 
 
 def _bbox(latitude: float, longitude: float, delta: float = _BBOX_DEGREES) -> str:
+    # Defensive cast: Postgres NUMERIC columns come back from psycopg as
+    # Decimal, not float, and Decimal - float raises TypeError. Open-Meteo's
+    # geocoding API returns plain floats, so this only bites once lat/lon has
+    # round-tripped through Lakebase — cast here so it can't resurface for
+    # any future caller that queries coordinates back out of the DB.
+    latitude, longitude = float(latitude), float(longitude)
     south, north = latitude - delta, latitude + delta
     west, east = longitude - delta, longitude + delta
     return f"{south},{west},{north},{east}"
@@ -44,15 +72,22 @@ def _build_query(latitude: float, longitude: float) -> str:
     clauses = []
     for tag in all_tags:
         key, _, value = tag.partition("=")
-        clauses.append(f'  node["{key}"="{value}"]({bbox});')
+        # nwr = node + way + relation. Restaurants/cafes are almost always
+        # mapped as single points (nodes), but parks, playgrounds, and many
+        # larger attractions are mapped as ways (polygon boundaries) or
+        # relations (multi-part areas) — querying node-only silently missed
+        # nearly all of those categories.
+        clauses.append(f'  nwr["{key}"="{value}"]({bbox});')
     tag_clauses = "\n".join(clauses)
-    # Overpass QL: fetch nodes matching any of our category tags, with tag output
+    # "out center;" adds a representative center coordinate for way/relation
+    # results (which have no single lat/lon of their own) while still giving
+    # nodes their normal coordinates directly — see _extract_coords below.
     return f"""
 [out:json][timeout:25];
 (
 {tag_clauses}
 );
-out body;
+out center;
 """
 
 
@@ -65,16 +100,54 @@ def _infer_category(tags: dict) -> str | None:
     return None
 
 
+def _candidate_urls() -> list[str]:
+    """Configured URL first, then fallback mirrors, de-duplicated in order."""
+    urls = [EXTERNAL_APIS.overpass_api_url]
+    for mirror in _FALLBACK_MIRRORS:
+        if mirror not in urls:
+            urls.append(mirror)
+    return urls
+
+
 @_RETRY
+def _post_query(query: str) -> dict:
+    """Posts the query to the first candidate URL that responds successfully,
+    falling back through the mirror list on 4xx/5xx or connection errors.
+    """
+    last_error: Exception | None = None
+    for url in _candidate_urls():
+        try:
+            resp = requests.post(url, data={"data": query}, timeout=30, headers=_REQUEST_HEADERS)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            continue
+    # Every mirror failed — let tenacity's @_RETRY retry the whole sweep
+    # (all mirrors again) before finally raising.
+    raise last_error
+
+
+def _extract_coords(el: dict) -> tuple[float | None, float | None]:
+    """Nodes carry lat/lon directly; ways/relations only get a coordinate at
+    all because the query uses "out center;" — their coords live under
+    el['center'] instead. Falls back to (None, None) if neither is present
+    (shouldn't happen given "out center;", but better than a KeyError).
+    """
+    if "lat" in el and "lon" in el:
+        return el["lat"], el["lon"]
+    center = el.get("center") or {}
+    return center.get("lat"), center.get("lon")
+
+
 def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
     """Fetches POIs near a destination with family/accessibility-relevant tags.
 
     Returns a list of dicts shaped to map directly onto `activities` columns.
     """
     query = _build_query(latitude, longitude)
-    resp = requests.post(EXTERNAL_APIS.overpass_api_url, data={"data": query}, timeout=30)
-    resp.raise_for_status()
-    elements = resp.json().get("elements", [])
+    data = _post_query(query)
+    elements = data.get("elements", [])
 
     pois = []
     for el in elements:
@@ -83,6 +156,10 @@ def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
         category = _infer_category(tags)
         if not name or not category:
             continue
+
+        poi_lat, poi_lon = _extract_coords(el)
+        if poi_lat is None or poi_lon is None:
+            continue  # no usable coordinate — skip rather than write a null-location row
 
         wheelchair = tags.get("wheelchair", "unknown")
         if wheelchair not in ("yes", "limited", "no"):
@@ -100,8 +177,8 @@ def fetch_family_pois(latitude: float, longitude: float) -> list[dict]:
                 "category": category,
                 "description": tags.get("description"),
                 "is_outdoor": category in ("playground", "outdoor"),
-                "latitude": el.get("lat"),
-                "longitude": el.get("lon"),
+                "latitude": poi_lat,
+                "longitude": poi_lon,
                 "osm_wheelchair": wheelchair,
                 "has_accessible_toilet": _yes_no(tags.get("toilets:wheelchair")),
                 "has_changing_table": _yes_no(tags.get("changing_table")),

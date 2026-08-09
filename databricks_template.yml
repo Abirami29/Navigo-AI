@@ -19,6 +19,7 @@ targets:
     default: true
     workspace:
       host: https://your-workspace.cloud.databricks.com
+      profile: navigo-admin
 
   prod:
     mode: production
