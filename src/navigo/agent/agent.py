@@ -26,6 +26,17 @@ You are Navigo, a family holiday planning assistant. Your job is to build \
 and adjust day-by-day itineraries that genuinely work for the specific \
 family on this trip — not a generic list of tourist attractions.
 
+CRITICAL — call exactly ONE tool at a time and wait for its real result
+before deciding your next step. NEVER write one tool call as text inside
+another tool call's arguments (e.g. never produce something like
+search_eligible_activities({"destination_id": "<result of
+get_trip_destination>"}) — that is not valid output and will be rejected).
+If you need get_trip_destination's result before calling
+search_eligible_activities, call get_trip_destination FIRST, wait for its
+actual tool result in the conversation, THEN call search_eligible_activities
+with the real value you got back. Multi-step tasks take multiple separate
+tool-call rounds — that's expected and fine, never shortcut it by nesting.
+
 STARTING A NEW TRIP: if the conversation has no established trip yet (the
 message is marked "[no trip created yet]"), your first job is figuring out
 whether the user wants to start one. If they describe a trip (a
@@ -544,19 +555,27 @@ _MAX_TOOL_ROUNDS = 20
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
-    """True only for HTTP 429 — REQUEST_LIMIT_EXCEEDED is genuinely transient
-    (Free Edition's pay-per-token endpoints have a modest tokens-per-minute
-    quota, and this payload — 20 tool schemas plus a large system prompt,
-    resent on every round of a multi-round conversation — is heavy enough to
-    hit it in practice). Other errors (400 schema issues, 401/403 auth) are
-    NOT retried here — retrying those would just waste time on something
-    that will never succeed.
+    """True for HTTP 429 (genuinely transient — Free Edition's tokens-per-
+    minute quota, see comment below) OR the specific 400 "did not respect
+    the required format" error — a real deployed run showed the model
+    trying to nest one tool call as text inside another's arguments
+    (<function=search_eligible_activities>{"destination_id":
+    "<function=get_trip_destination>...") instead of issuing two proper
+    tool calls. Databricks' API rejects that malformed output before it
+    reaches our code. This is a generation-sampling glitch, not a
+    deterministic logic error — retrying the identical request often just
+    works, since a fresh sample frequently comes out well-formed. Other 400s
+    (genuine schema/parameter errors) are NOT retried — only this specific
+    message pattern, so we don't waste time retrying something that will
+    never succeed.
     """
-    return (
-        isinstance(exc, requests.exceptions.HTTPError)
-        and exc.response is not None
-        and exc.response.status_code == 429
-    )
+    if not isinstance(exc, requests.exceptions.HTTPError) or exc.response is None:
+        return False
+    if exc.response.status_code == 429:
+        return True
+    if exc.response.status_code == 400 and "did not respect the required format" in str(exc):
+        return True
+    return False
 
 
 _workspace_client = None
@@ -583,10 +602,22 @@ def _get_auth_headers() -> dict:
     return _workspace_client.config.authenticate()
 
 
+def _wait_strategy(retry_state):
+    """1s flat wait for the malformed-tool-call-format retry (nothing needs
+    real backoff for a resample — the 4-60s exponential wait below is tuned
+    specifically for genuine 429 rate limits, and would make a user wait far
+    too long for what's really just 'try generating again').
+    """
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None and exc.response.status_code == 400:
+        return 1
+    return wait_exponential(multiplier=2, min=4, max=60)(retry_state)
+
+
 @retry(
     retry=retry_if_exception(_is_rate_limit_error),
     stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=2, min=4, max=60),
+    wait=_wait_strategy,
     reraise=True,
 )
 def _call_model_serving(messages: list[dict]) -> dict:

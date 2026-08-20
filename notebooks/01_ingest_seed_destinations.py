@@ -40,6 +40,22 @@ dbutils.widgets.text("lakebase_db", "navigo", "Lakebase database name")
 destination_name = dbutils.widgets.get("destination_name")
 mode = dbutils.widgets.get("mode")
 
+# Forces psycopg to use ONLY its pure-Python implementation, regardless of
+# what pip happened to install alongside it. A real run showed pip
+# installing psycopg-binary in this environment even though requirements.txt
+# only asks for plain psycopg — psycopg's own import-time logic then
+# preferred the binary implementation anyway, reproducing the exact SIGABRT
+# crash (a conflict with Databricks Runtime's own native libraries) that
+# switching to plain psycopg was supposed to have already fixed. This is a
+# stronger guarantee than controlling requirements.txt alone: it forces the
+# choice at import time and fails loudly (ImportError, not SIGABRT) if the
+# python implementation somehow isn't available, rather than silently
+# depending on pip's resolution being consistent. Must be set before
+# `from navigo.db import client as db` below, and ONLY here (notebooks/
+# Jobs) — the deployed App needs the OPPOSITE (binary), since its container
+# has no system libpq at all; forcing "python" there would break it again.
+os.environ["PSYCOPG_IMPL"] = "python"
+
 # Populate LAKEBASE_* env vars before navigo.db.client is ever imported —
 # this is the actual fix for a real deployment failure: jobs don't read
 # .env, and nothing else in this project was wiring credentials into a JOB's

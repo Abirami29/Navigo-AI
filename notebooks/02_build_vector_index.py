@@ -18,8 +18,30 @@
 
 # COMMAND ----------
 
+import os
 import sys
 sys.path.insert(0, "../src")
+
+# Same two fixes already proven necessary in 01_ingest_seed_destinations.py
+# and 03_decision_analytics_cdf.py — this notebook was missing BOTH (never
+# actually run yet, so the gap was latent rather than already discovered):
+# (1) psycopg needs to be forced to its pure-Python implementation, or a
+#     pip-installed psycopg-binary alongside it causes a SIGABRT crash in
+#     Databricks Runtime; (2) LAKEBASE_* credentials need to be injected
+#     from secrets, since Jobs/notebooks don't read .env and nothing else
+#     wires them in here. Both must happen before `from navigo.db import
+#     client as db` below.
+os.environ["PSYCOPG_IMPL"] = "python"
+
+dbutils.widgets.text("lakebase_port", "5432", "Lakebase port")
+dbutils.widgets.text("lakebase_db", "databricks_postgres", "Lakebase database name")
+
+if not os.getenv("LAKEBASE_HOST"):
+    os.environ["LAKEBASE_PORT"] = dbutils.widgets.get("lakebase_port")
+    os.environ["LAKEBASE_DB"] = dbutils.widgets.get("lakebase_db")
+    os.environ["LAKEBASE_HOST"] = dbutils.secrets.get(scope="navigo_secrets", key="lakebase_host")
+    os.environ["LAKEBASE_USER"] = dbutils.secrets.get(scope="navigo_secrets", key="lakebase_user")
+    os.environ["LAKEBASE_PASSWORD"] = dbutils.secrets.get(scope="navigo_secrets", key="lakebase_password")
 
 from databricks.vector_search.client import VectorSearchClient
 
@@ -31,6 +53,12 @@ SCHEMA = "default"
 SOURCE_TABLE = f"{CATALOG}.{SCHEMA}.activities_search_source"
 INDEX_NAME = DATABRICKS.vector_index
 ENDPOINT_NAME = DATABRICKS.vector_search_endpoint
+
+# Same fix needed here as in 03_decision_analytics_cdf.py — this notebook
+# has never actually been run yet, so this gap was latent: nothing ever
+# created the navigo.default catalog/schema this table writes into.
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
 

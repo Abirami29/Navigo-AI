@@ -412,6 +412,15 @@ def _keyword_fallback_rank(rows: list[dict], query_text: str, top_k: int) -> lis
     for real semantic search, but meaningfully better than arbitrary row
     order — a "museum" query now actually prefers rows whose category or
     name contains "museum".
+
+    IMPORTANT: zero-score rows are excluded, not just sorted last. A real
+    "zoo/animals" query returned restaurants like "crab kebab" as if they
+    were relevant matches — the old code took the top_k rows regardless of
+    whether they scored anything, so when nothing genuinely matched (no zoo
+    exists in that city's data), it silently padded the results with
+    whatever sorted first among all-zero scores, dominated by the most
+    numerous category. Returning fewer results (even zero) when nothing
+    truly matches is more honest than presenting irrelevant ones as choices.
     """
     query_words = {w for w in re.findall(r"\w+", query_text.lower()) if len(w) > 2}
     if not query_words:
@@ -423,8 +432,17 @@ def _keyword_fallback_rank(rows: list[dict], query_text: str, top_k: int) -> lis
         ).lower()
         return sum(1 for w in query_words if w in haystack)
 
-    scored = sorted(rows, key=score, reverse=True)
-    return scored[:top_k]
+    scored = [(score(row), row) for row in rows]
+    # key=lambda restricts comparison to the score only — sorting the raw
+    # (score, row) tuples directly meant any tie in score fell through to
+    # comparing the row dicts themselves as a tiebreaker, and dicts have no
+    # defined ordering. A real search ("outdoor, museum, science" in
+    # Aberdeen) hit exactly this: two rows tied on score, and the
+    # comparison crashed with "'<' not supported between instances of
+    # 'dict' and 'dict'" instead of ever returning results.
+    relevant = sorted((r for r in scored if r[0] > 0), key=lambda pair: pair[0])
+    relevant.reverse()
+    return [row for _, row in relevant[:top_k]]
 
 
 def search_activities_by_interest(
@@ -514,13 +532,31 @@ def create_itinerary_item(
     day_date: date,
     start_time: time,
     end_time: time,
-) -> str:
+) -> dict:
     """Adds a new activity to the itinerary. This was the actual missing
     piece behind "generate a day-by-day itinerary" — reschedule_item() could
     only ever move a row that already existed; nothing could create the
-    first one. Returns the new item_id.
+    first one.
+
+    Checks weather in CODE, not just via prompt instruction, for outdoor
+    activities — a real deployed run showed the agent never mentioning
+    weather when adding items despite the system prompt saying to, and an
+    independent review flagged the exact same gap: "some critical logic
+    (e.g., check weather before finalizing outdoor plans) depends on prompt
+    adherence rather than code enforcement." This closes that gap for real:
+    the check happens here regardless of what the model does or forgets to
+    do, and it's automatically logged to agent_decisions either way.
+
+    Returns {"item_id": ..., "weather_warning": str | None} rather than a
+    bare item_id — the warning needs to reach BOTH the model (so it can
+    relay it in its reply) and the UI (so it shows even if the model
+    doesn't mention it).
     """
-    return db.execute_returning_id(
+    activity = db.fetch_one(
+        "SELECT is_outdoor, destination_id, name FROM activities WHERE activity_id = %s",
+        (activity_id,),
+    )
+    item_id = db.execute_returning_id(
         """
         INSERT INTO itinerary_items (trip_id, activity_id, day_date, start_time, end_time, status)
         VALUES (%s, %s, %s, %s, %s, 'planned')
@@ -529,6 +565,29 @@ def create_itinerary_item(
         (trip_id, activity_id, day_date, start_time, end_time),
         id_column="item_id",
     )
+
+    weather_warning = None
+    if activity and activity["is_outdoor"]:
+        weather_rows = db.fetch_all(
+            "SELECT precipitation_prob, aqi FROM weather_snapshots "
+            "WHERE destination_id = %s AND forecast_date = %s",
+            (activity["destination_id"], day_date),
+        )
+        if weather_rows:
+            max_rain = max((r["precipitation_prob"] or 0) for r in weather_rows)
+            max_aqi = max((r["aqi"] or 0) for r in weather_rows)
+            if max_rain > 50 or max_aqi > 100:
+                trigger = "rain_forecast" if max_rain > 50 else "high_aqi"
+                reason = (
+                    f"rain ({max_rain}% chance)" if max_rain > 50 else f"poor air quality (AQI {max_aqi})"
+                )
+                weather_warning = (
+                    f"'{activity['name']}' is outdoor, and the forecast for {day_date} shows {reason} — "
+                    "worth reconsidering or having an indoor backup."
+                )
+                log_decision(trip_id, str(item_id), "weather_flag", trigger, weather_warning)
+
+    return {"item_id": item_id, "weather_warning": weather_warning}
 
 
 def delete_itinerary_item(trip_id: str, item_id: str, reason: str) -> None:

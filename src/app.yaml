@@ -1,0 +1,47 @@
+# Databricks App runtime configuration.
+# Lives at the ROOT of source_code_path (../../src, per
+# resources/apps/navigo_app.yml) — Databricks looks for app.yaml
+# specifically at that root, not wherever the entrypoint script happens to
+# be. This file used to live at src/navigo/app/app.yaml, which broke the
+# deploy entirely: source_code_path was scoped to that same subfolder, so
+# only streamlit_app.py + this file got uploaded — the rest of the navigo
+# package (db/, agent/, ingestion/, config.py) never made it into the
+# deployed app at all, causing "ModuleNotFoundError: No module named
+# 'navigo'" on a real deploy. Moving both source_code_path and this file up
+# to src/ fixes that: the whole package now deploys together.
+#
+# Deliberately uses the SAME individual LAKEBASE_HOST/PORT/DB/USER/PASSWORD
+# fields navigo.config already reads from .env locally — no code changes
+# needed to run in Databricks vs. your laptop. HOST, USER, and PASSWORD all
+# come from secrets (via valueFrom) — host is treated as sensitive too,
+# since it embeds the workspace ID, not just the credentials. Only PORT and
+# DB name (truly generic, no identifying info) are plain committed values.
+#
+# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/environment-variables
+
+# Path is now relative to src/ (the new deployed root), not
+# src/navigo/app/ — streamlit_app.py lives at navigo/app/streamlit_app.py
+# from here.
+command: ["streamlit", "run", "navigo/app/streamlit_app.py", "--server.port", "$DATABRICKS_APP_PORT"]
+
+env:
+  - name: LAKEBASE_HOST
+    valueFrom: lakebase-host
+  - name: LAKEBASE_PORT
+    value: "5432"
+  - name: LAKEBASE_DB
+    value: "databricks_postgres"
+  - name: LAKEBASE_USER
+    valueFrom: lakebase-user
+  - name: LAKEBASE_PASSWORD
+    valueFrom: lakebase-password
+
+  - name: NAVIGO_MODEL_SERVING_ENDPOINT
+    value: "databricks-meta-llama-3-3-70b-instruct"
+
+  # So `import navigo` resolves: the deployed root IS src/, and the navigo
+  # package sits directly under it (src/navigo/) — so "." is correct, not
+  # "../.." (that was based on the wrong assumption that the root was
+  # src/navigo/app/, which the ModuleNotFoundError proved false).
+  - name: PYTHONPATH
+    value: "."

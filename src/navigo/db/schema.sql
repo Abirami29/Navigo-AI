@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS agent_decisions (
     trip_id                UUID NOT NULL REFERENCES trips(trip_id) ON DELETE CASCADE,
     item_id                  UUID REFERENCES itinerary_items(item_id) ON DELETE SET NULL,
     decision_type              TEXT NOT NULL
-        CHECK (decision_type IN ('reschedule', 'swap', 'remove', 'packing_suggestion', 'accessibility_flag', 'dietary_flag')),
+        CHECK (decision_type IN ('reschedule', 'swap', 'remove', 'packing_suggestion', 'accessibility_flag', 'dietary_flag', 'weather_flag')),
     trigger                     TEXT NOT NULL
         CHECK (trigger IN ('rain_forecast', 'high_aqi', 'break_conflict', 'walk_budget_exceeded',
                             'unverified_accessibility', 'unverified_dietary_safety', 'user_request')),

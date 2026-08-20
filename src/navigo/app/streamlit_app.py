@@ -81,7 +81,7 @@ with tab_setup:
             age_cols = st.columns(min(int(num_children), 6))
             for i in range(int(num_children)):
                 child_ages.append(age_cols[i % len(age_cols)].number_input(
-                    f"Child {i + 1}", min_value=0, max_value=17, value=6, step=1, key=f"child_age_{i}",
+                    f"Child {i + 1} age", min_value=0, max_value=17, value=6, step=1, key=f"child_age_{i}",
                 ))
 
         st.subheader("Anything we should know?")
@@ -179,6 +179,11 @@ with tab_setup:
         trip_id = st.session_state.setup_trip_id
         destination_id = st.session_state.setup_destination_id
 
+        if st.session_state.get("last_add_message"):
+            st.success(st.session_state.pop("last_add_message"))
+        if st.session_state.get("last_weather_warning"):
+            st.warning(f"☁️ {st.session_state.pop('last_weather_warning')}")
+
         query_text = st.text_input(
             "Search for activities",
             value=st.session_state.browse_query,
@@ -211,6 +216,11 @@ with tab_setup:
                     )
                     st.session_state.browse_results = results
                     st.session_state.browse_query = query_text
+                    if not results:
+                        st.info(
+                            f"Nothing genuinely matched \"{query_text}\" here — try a broader "
+                            "search, or a different city may have better coverage for this."
+                        )
                 if weather_note:
                     st.caption(f"☁️{weather_note}")
             except Exception as exc:
@@ -249,15 +259,21 @@ with tab_setup:
 
         if st.button("💾 Add to itinerary", type="primary"):
             try:
-                new_item_id = tools.create_itinerary_item(
+                result = tools.create_itinerary_item(
                     st.session_state.setup_trip_id, chosen["activity_id"],
                     pick_day, pick_start, pick_end,
                 )
+                new_item_id = result["item_id"]
                 if chosen["osm_wheelchair"] == "unknown":
                     tools.flag_unverified_accessibility(
                         st.session_state.setup_trip_id, new_item_id, chosen["name"]
                     )
-                st.success(f"Added {chosen['name']} to the itinerary!")
+                # Stored in session_state rather than shown directly here —
+                # st.rerun() right below would restart the script before a
+                # message shown in THIS run is readable. Displayed properly
+                # at the top of the "browse" step below, after the rerun.
+                st.session_state.last_add_message = f"Added {chosen['name']} to the itinerary!"
+                st.session_state.last_weather_warning = result.get("weather_warning")
                 st.session_state.browse_results = []
                 st.session_state.browse_query = ""
                 st.session_state.setup_step = "browse"

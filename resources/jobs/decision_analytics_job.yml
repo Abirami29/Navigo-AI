@@ -1,0 +1,26 @@
+resources:
+  jobs:
+    navigo_decision_analytics:
+      name: navigo-decision-analytics
+      description: >
+        Incrementally syncs agent_decisions from Lakebase into a Delta mirror
+        (append-only, so CDF on it reflects genuine new decisions rather than
+        full-table churn), then reads only the new CDF-reported inserts since
+        the last run and merges them into a daily analytics table
+        (agent_decisions_analytics: counts by decision_type/trigger/day).
+        Runs daily — decision volume doesn't need faster refresh than that.
+      schedule:
+        quartz_cron_expression: "0 30 3 * * ?"    # daily at 03:30 UTC, after poi_sync's 03:00
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: sync_and_analyze_decisions
+          notebook_task:
+            notebook_path: ../../notebooks/03_decision_analytics_cdf.py
+            base_parameters:
+              lakebase_port: "5432"
+              lakebase_db: databricks_postgres
+          # No environment_key — same reasoning as poi_sync_job.yml and
+          # weather_refresh_job.yml: notebook_task doesn't support job-level
+          # environment blocks on serverless. Dependencies come from the
+          # notebook's own %pip install cell.

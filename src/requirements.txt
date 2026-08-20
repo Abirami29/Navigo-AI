@@ -1,0 +1,24 @@
+# Copy of the repo-root requirements.txt, kept here deliberately — not a
+# duplicate by accident. Databricks Apps only install dependencies from a
+# requirements.txt found at the ROOT of source_code_path (now src/, see
+# resources/apps/navigo_app.yml); a real deploy without this file present
+# here failed with "ModuleNotFoundError: No module named 'psycopg'" even
+# though the repo-root requirements.txt existed one level up.
+#
+# NOT a straight copy of the root file: psycopg[binary] here, plain psycopg
+# there. This App's container has no system libpq at all ("libpq library
+# not found" on a real deploy), so it needs the binary variant that bundles
+# its own. The Job's Databricks Runtime environment DOES have a system
+# libpq, but a conflicting one — psycopg[binary] SIGABRT-crashed there
+# specifically, which is why the Job uses plain psycopg instead. Two
+# different container types, two different correct answers — keep both
+# requirements.txt files and don't try to unify them into one again.
+requests>=2.31
+psycopg[binary]>=3.1
+python-dotenv>=1.0
+streamlit>=1.35
+pandas>=2.2
+tenacity>=8.2
+pytest>=8.0
+databricks-vectorsearch>=0.40
+databricks-sdk>=0.20.0
